@@ -1,0 +1,295 @@
+package com.presencetimer.app
+
+import android.content.Context
+import android.content.SharedPreferences
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.update
+import org.json.JSONArray
+import org.json.JSONObject
+import java.time.LocalDate
+
+data class Record(
+    val id: String,
+    val timestamp: Long,
+    val durationMs: Long,
+    val dateKey: String,
+    val monthKey: String,
+    val label: String
+)
+
+data class AppSettings(
+    val hideCamera: Boolean = false,
+    val alarmEnabled: Boolean = false,          // person-missing alarm
+    val humanAlarmEnabled: Boolean = false,     // human-detected alarm
+    val overlayEnabled: Boolean = false,        // floating timer over other apps
+    val overlayPosition: Int = 1                // 0 = left, 1 = center, 2 = right
+)
+
+data class Stats(
+    val todayMs: Long,
+    val monthMs: Long,
+    val allMs: Long,
+    val daysThisMonth: Int,
+    val streak: Int,
+    val bestDayMs: Long
+)
+
+/**
+ * Local persistence. Uses the SAME keys and JSON shapes as the web app's localStorage,
+ * so backups exported from index.html can be imported here (and vice-versa).
+ */
+object Store {
+    const val KEY_RECORDS = "presenceTimerRecordsV1"
+    const val KEY_SETTINGS = "presenceTimerSettingsV1"
+    const val KEY_TIMER = "presenceTimerStateV1"
+    const val KEY_DAILY = "presenceTimerDailyStudyV1"
+    const val KEY_IMPORTED = "presenceTimerImportedBackups"
+
+    private lateinit var prefs: SharedPreferences
+    private val lock = Any()
+    private val records = mutableListOf<Record>()
+    private val daily = LinkedHashMap<String, Long>()
+    private var rawSettings = JSONObject()
+
+    val settingsFlow = MutableStateFlow(AppSettings())
+
+    /** Bumped whenever stored data changes so the UI re-reads totals / lists. */
+    val version = MutableStateFlow(0)
+
+    fun init(context: Context) {
+        synchronized(lock) {
+            if (::prefs.isInitialized) return
+            prefs = context.applicationContext.getSharedPreferences("presence_timer_store", Context.MODE_PRIVATE)
+
+            try {
+                val arr = JSONArray(prefs.getString(KEY_RECORDS, "[]"))
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val id = o.optString("id")
+                    val dur = o.optLong("durationMs")
+                    val ts = o.optLong("timestamp")
+                    if (id.isEmpty() || dur <= 0 || ts <= 0) continue
+                    records.add(Record(id, ts, dur, o.optString("dateKey", Fmt.dateKey(ts)),
+                        o.optString("monthKey", Fmt.monthKey(ts)), o.optString("label", "Saved timer")))
+                }
+            } catch (_: Exception) { }
+
+            try {
+                val o = JSONObject(prefs.getString(KEY_DAILY, "{}"))
+                for (k in o.keys()) {
+                    val v = o.optLong(k)
+                    if (DATE_RE.matches(k) && v > 0) daily[k] = v
+                }
+            } catch (_: Exception) { }
+
+            try {
+                rawSettings = JSONObject(prefs.getString(KEY_SETTINGS, "{}"))
+            } catch (_: Exception) { }
+            settingsFlow.value = AppSettings(
+                hideCamera = rawSettings.optBoolean("hideCamera", false),
+                alarmEnabled = rawSettings.optBoolean("alarmEnabled", false),
+                humanAlarmEnabled = rawSettings.optBoolean("humanDetectedAlarmEnabled", false),
+                overlayEnabled = rawSettings.optBoolean("overlayEnabled", false),
+                overlayPosition = rawSettings.optInt("overlayPosition", 1).coerceIn(0, 2)
+            )
+        }
+    }
+
+    private val DATE_RE = Regex("^\\d{4}-\\d{2}-\\d{2}$")
+
+    // ---------- settings ----------
+
+    fun updateSettings(transform: (AppSettings) -> AppSettings) {
+        synchronized(lock) {
+            val s = transform(settingsFlow.value)
+            // Merge into the raw JSON so unknown keys (e.g. from a web backup) survive.
+            rawSettings.put("hideCamera", s.hideCamera)
+            rawSettings.put("alarmEnabled", s.alarmEnabled)
+            rawSettings.put("humanDetectedAlarmEnabled", s.humanAlarmEnabled)
+            rawSettings.put("overlayEnabled", s.overlayEnabled)
+            rawSettings.put("overlayPosition", s.overlayPosition)
+            prefs.edit().putString(KEY_SETTINGS, rawSettings.toString()).apply()
+            settingsFlow.update { s }
+        }
+    }
+
+    // ---------- timer state ----------
+
+    data class TimerSnapshot(val accumulatedMs: Long, val savedThroughMs: Long)
+
+    fun loadTimer(): TimerSnapshot = synchronized(lock) {
+        try {
+            val o = JSONObject(prefs.getString(KEY_TIMER, "{}"))
+            val acc = maxOf(0L, o.optLong("accumulatedTime"))
+            TimerSnapshot(acc, minOf(acc, maxOf(0L, o.optLong("savedThroughTime"))))
+        } catch (_: Exception) {
+            TimerSnapshot(0, 0)
+        }
+    }
+
+    fun saveTimer(accumulatedMs: Long, savedThroughMs: Long, isPresent: Boolean, sessionStart: Long) {
+        synchronized(lock) {
+            val o = JSONObject()
+                .put("accumulatedTime", accumulatedMs)
+                .put("savedThroughTime", savedThroughMs)
+                .put("isPresent", isPresent)
+                .put("sessionStartTime", sessionStart)
+                .put("savedAt", System.currentTimeMillis())
+            prefs.edit().putString(KEY_TIMER, o.toString()).apply()
+        }
+    }
+
+    fun clearTimer() {
+        synchronized(lock) { prefs.edit().remove(KEY_TIMER).apply() }
+    }
+
+    // ---------- daily ledger ----------
+
+    /** Adds an interval to the right calendar day(s); splits automatically across midnight. */
+    fun addInterval(startTs: Long, endTs: Long) {
+        if (startTs <= 0 || endTs <= startTs) return
+        synchronized(lock) {
+            var start = startTs
+            while (start < endTs) {
+                val segEnd = minOf(endTs, Fmt.nextMidnight(start))
+                val dur = segEnd - start
+                if (dur > 0) {
+                    val key = Fmt.dateKey(start)
+                    daily[key] = (daily[key] ?: 0L) + dur
+                }
+                start = segEnd
+            }
+            persistDaily()
+        }
+    }
+
+    private fun persistDaily() {
+        val o = JSONObject()
+        daily.forEach { (k, v) -> o.put(k, v) }
+        prefs.edit().putString(KEY_DAILY, o.toString()).apply()
+    }
+
+    fun dailySnapshot(): Map<String, Long> = synchronized(lock) { LinkedHashMap(daily) }
+
+    fun mergeDaily(extra: Map<String, Long>) {
+        synchronized(lock) {
+            for ((k, v) in extra) {
+                if (!DATE_RE.matches(k) || v <= 0) continue
+                daily[k] = (daily[k] ?: 0L) + v
+            }
+            persistDaily()
+        }
+        notifyChanged()
+    }
+
+    fun todayMs(now: Long = System.currentTimeMillis()): Long =
+        synchronized(lock) { daily[Fmt.dateKey(now)] ?: 0L }
+
+    fun stats(now: Long = System.currentTimeMillis()): Stats = synchronized(lock) {
+        val today = Fmt.dateKey(now)
+        val month = Fmt.monthKey(now)
+        val todayMs = daily[today] ?: 0L
+        var monthMs = 0L; var allMs = 0L; var days = 0; var best = 0L
+        for ((k, v) in daily) {
+            allMs += v
+            if (k.startsWith(month)) {
+                monthMs += v
+                if (v > 0) days++
+            }
+            if (v > best) best = v
+        }
+        var streak = 0
+        var cursor = LocalDate.parse(today)
+        if (todayMs <= 0) cursor = cursor.minusDays(1)
+        while ((daily[cursor.toString()] ?: 0L) > 0) {
+            streak++
+            cursor = cursor.minusDays(1)
+        }
+        Stats(todayMs, monthMs, allMs, days, streak, best)
+    }
+
+    // ---------- saved records ----------
+
+    fun recordsSnapshot(): List<Record> = synchronized(lock) { records.toList() }
+
+    fun addRecord(r: Record) {
+        synchronized(lock) { records.add(r); persistRecords() }
+        notifyChanged()
+    }
+
+    fun clearRecords() {
+        synchronized(lock) { records.clear(); persistRecords() }
+        notifyChanged()
+    }
+
+    /** Returns how many new records were added. Existing ids are skipped (idempotent). */
+    fun mergeRecords(extra: List<Record>): Int {
+        var added = 0
+        synchronized(lock) {
+            val ids = records.map { it.id }.toHashSet()
+            for (r in extra) {
+                if (r.id.isEmpty() || r.id in ids || r.durationMs <= 0 || r.timestamp <= 0) continue
+                records.add(r); ids.add(r.id); added++
+            }
+            records.sortBy { it.timestamp }
+            persistRecords()
+        }
+        notifyChanged()
+        return added
+    }
+
+    private fun persistRecords() {
+        val arr = JSONArray()
+        records.forEach {
+            arr.put(JSONObject().put("id", it.id).put("timestamp", it.timestamp)
+                .put("durationMs", it.durationMs).put("dateKey", it.dateKey)
+                .put("monthKey", it.monthKey).put("label", it.label))
+        }
+        prefs.edit().putString(KEY_RECORDS, arr.toString()).apply()
+    }
+
+    fun clearAll() {
+        synchronized(lock) {
+            records.clear(); daily.clear()
+            prefs.edit().remove(KEY_RECORDS).remove(KEY_DAILY).remove(KEY_TIMER).apply()
+        }
+        notifyChanged()
+    }
+
+    // ---------- backup support ----------
+
+    /** All app data as {key: jsonString}, matching the web app's backup "storage" object. */
+    fun exportStorage(): JSONObject = synchronized(lock) {
+        val o = JSONObject()
+        val arr = JSONArray()
+        records.forEach {
+            arr.put(JSONObject().put("id", it.id).put("timestamp", it.timestamp)
+                .put("durationMs", it.durationMs).put("dateKey", it.dateKey)
+                .put("monthKey", it.monthKey).put("label", it.label))
+        }
+        o.put(KEY_RECORDS, arr.toString())
+        val d = JSONObject(); daily.forEach { (k, v) -> d.put(k, v) }
+        o.put(KEY_DAILY, d.toString())
+        prefs.getString(KEY_TIMER, null)?.let { o.put(KEY_TIMER, it) }
+        o.put(KEY_SETTINGS, rawSettings.toString())
+        o
+    }
+
+    fun importedIds(): List<String> = synchronized(lock) {
+        try {
+            val a = JSONArray(prefs.getString(KEY_IMPORTED, "[]"))
+            (0 until a.length()).mapNotNull { a.optString(it).takeIf { s -> s.isNotEmpty() } }
+        } catch (_: Exception) { emptyList() }
+    }
+
+    fun rememberImported(id: String) {
+        synchronized(lock) {
+            val ids = importedIds().toMutableList()
+            if (id !in ids) ids.add(id)
+            val arr = JSONArray(); ids.takeLast(50).forEach { arr.put(it) }
+            prefs.edit().putString(KEY_IMPORTED, arr.toString()).apply()
+        }
+    }
+
+    fun notifyChanged() { version.update { it + 1 } }
+}

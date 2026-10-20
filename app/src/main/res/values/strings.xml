@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Presence Timer</string>
+    <string name="channel_timer">Presence timer</string>
+    <string name="channel_timer_desc">Shows the running presence timer while detection is active</string>
+</resources>
