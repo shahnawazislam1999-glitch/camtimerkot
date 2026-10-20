@@ -1,6 +1,7 @@
 package com.presencetimer.app.ui
 
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
@@ -22,6 +23,9 @@ fun PresenceTheme(content: @Composable () -> Unit) {
             primary = Accent, background = Bg, surface = Bg, onSurface = Color.White,
             onBackground = Color.White
         ),
-        content = content
-    )
+    ) {
+        // Surface supplies LocalContentColor = onSurface (white). Without it, Text() with no
+        // explicit color defaults to BLACK, which is invisible on the black background.
+        Surface(color = Bg, contentColor = Color.White, content = content)
+    }
 }
