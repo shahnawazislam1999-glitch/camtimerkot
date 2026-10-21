@@ -48,6 +48,7 @@ class PresenceService : LifecycleService() {
     companion object {
         const val ACTION_START = "com.presencetimer.app.START"
         const val ACTION_STOP = "com.presencetimer.app.STOP"
+        const val ACTION_TOGGLE_PAUSE = "com.presencetimer.app.TOGGLE_PAUSE"
         private const val CHANNEL_ID = "presence_timer"
         private const val NOTIF_ID = 1001
 
@@ -137,7 +138,11 @@ class PresenceService : LifecycleService() {
             },
             onError = { msg -> Engine.reportError(msg) }
         )
-        overlay = OverlayController(this)
+        overlay = OverlayController(this) {
+            // Double-tap on the floating timer = pause / resume
+            Engine.togglePause()
+            refreshOutputs(); evaluateAlarm()
+        }
         alarm = AlarmPlayer(this)
         createChannel()
         ProcessLifecycleOwner.get().lifecycle.addObserver(processObserver)
@@ -152,9 +157,23 @@ class PresenceService : LifecycleService() {
         super.onStartCommand(intent, flags, startId)
         when (intent?.action) {
             ACTION_STOP -> shutdown()
+            ACTION_TOGGLE_PAUSE -> {
+                if (running) { Engine.togglePause(); refreshOutputs(); evaluateAlarm() }
+            }
             else -> startDetection()
         }
-        return START_NOT_STICKY
+        // STICKY: if the system kills the process, it recreates the service (null intent -> startDetection()).
+        // A deliberate Stop calls stopSelf(), which is never restarted.
+        return START_STICKY
+    }
+
+    /** User swiped the app out of Recents: keep tracking, timer, notification and overlay running. */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        if (running) {
+            acquireWakeLock()
+            refreshOutputs()
+        }
     }
 
     // ---------- start / stop ----------
@@ -459,6 +478,7 @@ class PresenceService : LifecycleService() {
     private fun evaluateAlarm() {
         if (!running) { setAlarm(null); return }
         if (periodic && sleeping) { setAlarm(null); return }   // camera is off between checks
+        if (Engine.isPaused()) { setAlarm(null); return }      // manually paused: stay silent
         val s = Store.settingsFlow.value
         val now = System.currentTimeMillis()
         // PC link down (network switch, PC asleep): we simply cannot see anyone, so never sound a false alarm.
@@ -497,7 +517,7 @@ class PresenceService : LifecycleService() {
 
         val s = Store.settingsFlow.value
         val show = s.overlayEnabled && live.detecting && !appVisible && Settings.canDrawOverlays(this)
-        if (show) overlay.show(Fmt.time(live.displayMs(now)), live.present, s.overlayPosition)
+        if (show) overlay.show(Fmt.time(live.displayMs(now)), live.present, s.overlayPosition, live.paused)
         else overlay.hide()
     }
 
@@ -514,6 +534,7 @@ class PresenceService : LifecycleService() {
     private fun buildNotification(now: Long, live: LiveState): Notification {
         val nextIn = if (live.nextCheckAtMs > 0) Fmt.time(live.nextCheckAtMs - now) else ""
         val text = when {
+            live.detecting && live.paused -> "⏸ Paused — timer frozen • tap Resume"
             live.detecting && live.periodic && live.sleeping ->
                 (if (live.present) "🟢 Timer running" else "🔴 Timer stopped") + " • camera asleep • next check in $nextIn"
             live.detecting && live.periodic && live.checking && !live.present -> "🔍 Checking camera…"
@@ -532,6 +553,11 @@ class PresenceService : LifecycleService() {
             Intent(this, PresenceService::class.java).setAction(ACTION_STOP),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
+        val pause = PendingIntent.getService(
+            this, 2,
+            Intent(this, PresenceService::class.java).setAction(ACTION_TOGGLE_PAUSE),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_timer)
             .setColor(0xFFFF2D3F.toInt())
@@ -539,6 +565,7 @@ class PresenceService : LifecycleService() {
             .setContentText(text)
             .setSubText("Today ${Fmt.time(Store.todayMs(now))}")
             .setContentIntent(open)
+            .addAction(0, if (live.paused) "Resume" else "Pause", pause)
             .addAction(0, "Stop", stop)
             .setOngoing(true)
             .setOnlyAlertOnce(true)

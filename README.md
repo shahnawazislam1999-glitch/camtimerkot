@@ -5,8 +5,8 @@ saved records, alarms and backup/restore. Adds what a web page cannot do:
 
 | Feature | How |
 |---|---|
-| Timer in notification panel | Foreground service notification, updated every second, with a Stop button |
-| Tiny dim timer over other apps | `SYSTEM_ALERT_WINDOW` overlay, 30% opacity, touch-through. Shown only while you are outside the app |
+| Timer in notification panel | Foreground service notification, updated every second, with **Pause/Resume** and Stop buttons |
+| Tiny dim timer over other apps | `SYSTEM_ALERT_WINDOW` overlay, 35% opacity. **Double-tap it to pause/resume** (only the tiny pill takes touches). Shown only while you are outside the app |
 | Keeps tracking when minimized | Foreground service (type `camera`) + CameraX + ML Kit + partial wake lock |
 | Alarms in background | Bundled `alarm.mp3` (extracted from your HTML) on the alarm stream |
 | Icon | Red dot on black adaptive icon (+ themed monochrome version) |
@@ -31,7 +31,7 @@ To build locally: open the folder in Android Studio (Hedgehog or newer) and pres
 ## Android limits to know about
 - Android shows a green camera indicator whenever the camera is used. This cannot be removed.
 - Start tracking while the app is open. Android will not let an app start a camera service from the background.
-- If you swipe the app away and the system kills the service, tracking stops (it cannot restart itself).
+- Swiping the app out of Recents does **not** stop tracking (service is `stopWithTask=false`, sticky, wake-locked). If a phone maker force-kills it anyway, Android restarts it when allowed; phone-camera mode cannot reopen the camera from the background, so lock the app in Recents too.
 - Some phones (Xiaomi, Oppo, Vivo, Huawei, Samsung) kill background apps aggressively. Set battery to
   "Unrestricted" and enable Autostart / "lock in recents".
 - Some devices pause camera frames when the screen is off. The timer then pauses (no frames = nobody seen).

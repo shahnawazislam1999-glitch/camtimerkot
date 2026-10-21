@@ -61,6 +61,7 @@
         <service
             android:name=".PresenceService"
             android:exported="false"
+            android:stopWithTask="false"
             android:foregroundServiceType="camera|specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"

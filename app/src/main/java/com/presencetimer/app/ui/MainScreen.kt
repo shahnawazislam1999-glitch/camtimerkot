@@ -166,7 +166,7 @@ fun MainScreen(lifecycle: Lifecycle, perms: PermState, pendingImportLabel: Strin
                         extraColor = if (live.alarmPlayingText != null) RedC else Muted
                     ) { v -> Store.updateSettings { it.copy(alarmEnabled = v) } }
                     ToggleRow("Floating timer over other apps",
-                        "Tiny, dim (30% opacity) timer shown on top of other apps while you are outside this app.",
+                        "Tiny, dim (35% opacity) timer shown on top of other apps while you are outside this app. Double-tap it to pause / resume.",
                         settings.overlayEnabled && perms.overlay) { v ->
                         Store.updateSettings { it.copy(overlayEnabled = v) }
                         if (v && !perms.overlay) actions.onOverlayPerm()

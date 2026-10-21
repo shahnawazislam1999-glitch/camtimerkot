@@ -11,16 +11,19 @@ import android.text.SpannableString
 import android.text.Spanned
 import android.text.style.ForegroundColorSpan
 import android.util.TypedValue
+import android.view.GestureDetector
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.WindowManager
 import android.widget.TextView
 
 /**
  * Tiny floating timer drawn over other apps (SYSTEM_ALERT_WINDOW).
- * 30% opacity, not touchable, so it never blocks the app underneath.
+ * 35% opacity. Only the tiny pill itself takes touches (double-tap = pause / resume);
+ * everything around it still goes to the app underneath.
  */
-class OverlayController(private val context: Context) {
-    companion object { const val OPACITY = 0.30f }
+class OverlayController(private val context: Context, private val onDoubleTap: () -> Unit = {}) {
+    companion object { const val OPACITY = 0.35f }
 
     private val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
     private var view: TextView? = null
@@ -41,18 +44,20 @@ class OverlayController(private val context: Context) {
         else -> Gravity.CENTER_HORIZONTAL
     }
 
-    fun show(time: String, running: Boolean, pos: Int) {
+    fun show(time: String, running: Boolean, pos: Int, paused: Boolean = false) {
         if (!Settings.canDrawOverlays(context)) return
         try {
             if (view == null) create(pos)
             val v = view ?: return
             val p = params ?: return
 
-            val text = "● $time"
+            val prefix = if (paused) "❚❚" else "●"
+            val text = "$prefix $time"
             if (text != lastText || running != (v.tag == true)) {
                 val s = SpannableString(text)
-                s.setSpan(ForegroundColorSpan(if (running) Color.parseColor("#FF2D3F") else Color.GRAY),
-                    0, 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                s.setSpan(ForegroundColorSpan(
+                        if (paused) Color.parseColor("#FFB020") else if (running) Color.parseColor("#FF2D3F") else Color.GRAY),
+                    0, prefix.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
                 v.text = s
                 v.tag = running
                 lastText = text
@@ -70,20 +75,25 @@ class OverlayController(private val context: Context) {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             setTextColor(Color.WHITE)
             typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-            setPadding(dp(8f), dp(3f), dp(8f), dp(3f))
+            setPadding(dp(10f), dp(6f), dp(10f), dp(6f))
             background = GradientDrawable().apply {
                 setColor(Color.BLACK)
                 cornerRadius = dp(10f).toFloat()
             }
-            alpha = OPACITY   // 30% opacity
+            alpha = OPACITY   // 35% opacity
         }
+        val detector = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
+            override fun onDown(e: MotionEvent) = true
+            override fun onDoubleTap(e: MotionEvent): Boolean { onDoubleTap(); return true }
+        })
+        v.setOnTouchListener { _, e -> detector.onTouchEvent(e); true }
         val p = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             if (Build.VERSION.SDK_INT >= 26) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
             else @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
         ).apply {

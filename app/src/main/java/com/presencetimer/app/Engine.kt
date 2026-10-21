@@ -35,7 +35,9 @@ data class LiveState(
     val periodic: Boolean = false,
     val checking: Boolean = false,      // camera is on right now, looking for a human
     val sleeping: Boolean = false,      // camera is off until nextCheckAtMs
-    val nextCheckAtMs: Long = 0
+    val nextCheckAtMs: Long = 0,
+    // Manual pause (notification button / double-tap on the floating timer)
+    val paused: Boolean = false
 ) {
     fun displayMs(now: Long): Long =
         accumulatedMs + if (present && detecting && sessionStartMs > 0) maxOf(0L, now - sessionStartMs) else 0L
@@ -70,6 +72,7 @@ object Engine {
     private var lastSaveAt = 0L
     private var lastNotifyAt = 0L
     private var periodic = false
+    private var manualPaused = false
     private val recentWeak = ArrayDeque<Int>()
 
     fun init() {
@@ -101,15 +104,44 @@ object Engine {
     fun startDetection(periodicMode: Boolean = false) {
         synchronized(lock) {
             periodic = periodicMode
+            manualPaused = false
             detecting = true; present = false
             firstSeen = 0; lastSeen = 0; sessionStart = 0; dailyCursor = 0
             recentWeak.clear(); personWasSeen = false
             lastFrameAt = 0; lastFrameHuman = false
             publish { it.copy(status = "🟡 Looking for face or body...", statusKind = StatusKind.IDLE,
                 detectionText = "Camera active", error = null, faces = emptyList(), body = null,
-                periodic = periodicMode, checking = periodicMode, sleeping = false, nextCheckAtMs = 0) }
+                periodic = periodicMode, checking = periodicMode, sleeping = false, nextCheckAtMs = 0,
+                paused = false) }
         }
     }
+
+    fun isPaused(): Boolean = synchronized(lock) { manualPaused }
+
+    /**
+     * Manual pause / resume of the timer. While paused the timer is frozen (the running session is
+     * closed and saved) and no new session starts, even though detection keeps running so that
+     * resuming picks up again within a second.
+     */
+    fun setPaused(pause: Boolean, now: Long = System.currentTimeMillis()) {
+        synchronized(lock) {
+            if (!detecting || manualPaused == pause) return
+            manualPaused = pause
+            if (pause) {
+                if (present) { endSession(now); saveTimerState(now) }
+                firstSeen = 0; lastSeen = 0
+                publish { it.copy(paused = true, status = "⏸ Paused manually — timer frozen",
+                    statusKind = StatusKind.PAUSED) }
+            } else {
+                firstSeen = 0; lastSeen = 0
+                publish { it.copy(paused = false, status = "🟡 Resumed — looking for face or body...",
+                    statusKind = StatusKind.IDLE) }
+            }
+        }
+        Store.notifyChanged()
+    }
+
+    fun togglePause(now: Long = System.currentTimeMillis()) = setPaused(!isPaused(), now)
 
     /** Switches periodic mode on/off while detection keeps running. */
     fun setPeriodic(on: Boolean, now: Long = System.currentTimeMillis()) {
@@ -140,7 +172,7 @@ object Engine {
             firstSeen = 0; lastSeen = 0
             recentWeak.clear(); lastFrameHuman = false
             publish { it.copy(
-                status = reason ?: "🔴 Nobody found at the check — Timer stopped",
+                status = if (manualPaused) it.status else (reason ?: "🔴 Nobody found at the check — Timer stopped"),
                 statusKind = StatusKind.PAUSED, detectionText = "Detected: None",
                 faces = emptyList(), body = null) }
         }
@@ -150,11 +182,11 @@ object Engine {
         synchronized(lock) {
             if (!detecting && !present) return
             if (present) { endSession(now); saveTimerState(now) }
-            detecting = false; periodic = false
+            detecting = false; periodic = false; manualPaused = false
             recentWeak.clear(); personWasSeen = false
             publish { it.copy(status = "⚪ Detection stopped", statusKind = StatusKind.IDLE,
                 detectionText = "Camera stopped", faces = emptyList(), body = null, alarmPlayingText = null,
-                periodic = false, checking = false, sleeping = false, nextCheckAtMs = 0) }
+                periodic = false, checking = false, sleeping = false, nextCheckAtMs = 0, paused = false) }
         }
         Store.notifyChanged()
     }
@@ -227,7 +259,7 @@ object Engine {
                 personWasSeen = true
                 if (firstSeen == 0L) firstSeen = now
                 lastSeen = now
-                if (!present && now - firstSeen >= START_DEBOUNCE_MS) {
+                if (!manualPaused && !present && now - firstSeen >= START_DEBOUNCE_MS) {
                     present = true; sessionStart = now; dailyCursor = now
                     status = "🟢 Human detected — Timer running"; kind = StatusKind.RUNNING
                 }
