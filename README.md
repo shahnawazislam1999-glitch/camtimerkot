@@ -6,7 +6,7 @@ saved records, alarms and backup/restore. Adds what a web page cannot do:
 | Feature | How |
 |---|---|
 | Timer in notification panel | Foreground service notification, updated every second, with **Pause/Resume** and Stop buttons |
-| Tiny dim timer over other apps | `SYSTEM_ALERT_WINDOW` overlay, 35% opacity. **Double-tap it to pause/resume** (only the tiny pill takes touches). Shown only while you are outside the app |
+| Tiny dim timer over other apps | `SYSTEM_ALERT_WINDOW` overlay, 35% opacity. **Drag it anywhere; double tap = pause, double tap again = start instantly (forces an instant check in periodic mode)**. Shown only while you are outside the app |
 | Keeps tracking when minimized | Foreground service (type `camera`) + CameraX + ML Kit + partial wake lock |
 | Alarms in background | Bundled `alarm.mp3` (extracted from your HTML) on the alarm stream |
 | Icon | Red dot on black adaptive icon (+ themed monochrome version) |

@@ -14,6 +14,7 @@ import android.util.TypedValue
 import android.view.GestureDetector
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.widget.TextView
 
@@ -22,7 +23,11 @@ import android.widget.TextView
  * 35% opacity. Only the tiny pill itself takes touches (double-tap = pause / resume);
  * everything around it still goes to the app underneath.
  */
-class OverlayController(private val context: Context, private val onDoubleTap: () -> Unit = {}) {
+class OverlayController(
+    private val context: Context,
+    private val onSingleTap: () -> Unit = {},
+    private val onDoubleTap: () -> Unit = {}
+) {
     companion object { const val OPACITY = 0.35f }
 
     private val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
@@ -30,6 +35,8 @@ class OverlayController(private val context: Context, private val onDoubleTap: (
     private var params: WindowManager.LayoutParams? = null
     private var position = -1
     private var lastText = ""
+    private var absolute = false      // true once the user dragged it (or a saved spot was restored)
+    private val prefs = context.getSharedPreferences("overlay_pos", Context.MODE_PRIVATE)
 
     private fun dp(v: Float) = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v, context.resources.displayMetrics).toInt()
 
@@ -64,7 +71,11 @@ class OverlayController(private val context: Context, private val onDoubleTap: (
             }
             if (pos != position) {
                 position = pos
+                // Picking another preset in Settings overrides a dragged spot.
+                absolute = false
+                try { prefs.edit().clear().apply() } catch (_: Exception) { }
                 p.gravity = gravityFor(pos)
+                p.x = dp(8f); p.y = statusBarHeight() + dp(4f)
                 wm.updateViewLayout(v, p)
             }
         } catch (_: Exception) { }
@@ -82,11 +93,52 @@ class OverlayController(private val context: Context, private val onDoubleTap: (
             }
             alpha = OPACITY   // 35% opacity
         }
+        var dragging = false
+        var downX = 0f; var downY = 0f; var startX = 0; var startY = 0
+        val slop = ViewConfiguration.get(context).scaledTouchSlop
         val detector = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
             override fun onDown(e: MotionEvent) = true
-            override fun onDoubleTap(e: MotionEvent): Boolean { onDoubleTap(); return true }
+            override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+                if (!dragging) onSingleTap()
+                return true
+            }
+            override fun onDoubleTapEvent(e: MotionEvent): Boolean {
+                if (e.actionMasked == MotionEvent.ACTION_UP && !dragging) onDoubleTap()
+                return true
+            }
         })
-        v.setOnTouchListener { _, e -> detector.onTouchEvent(e); true }
+        v.setOnTouchListener { view, e ->
+            val p = params
+            if (p != null) when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    dragging = false
+                    if (!absolute) {   // switch from preset gravity to absolute screen coordinates
+                        val loc = IntArray(2)
+                        view.getLocationOnScreen(loc)
+                        p.gravity = Gravity.TOP or Gravity.START
+                        p.x = loc[0]; p.y = loc[1]
+                        absolute = true
+                        try { wm.updateViewLayout(view, p) } catch (_: Exception) { }
+                    }
+                    downX = e.rawX; downY = e.rawY; startX = p.x; startY = p.y
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = e.rawX - downX; val dy = e.rawY - downY
+                    if (!dragging && Math.hypot(dx.toDouble(), dy.toDouble()) > slop) dragging = true
+                    if (dragging) {
+                        val dm = context.resources.displayMetrics
+                        p.x = (startX + dx).toInt().coerceIn(0, maxOf(0, dm.widthPixels - view.width))
+                        p.y = (startY + dy).toInt().coerceIn(0, maxOf(0, dm.heightPixels - view.height))
+                        try { wm.updateViewLayout(view, p) } catch (_: Exception) { }
+                    }
+                }
+                MotionEvent.ACTION_UP -> if (dragging) {
+                    try { prefs.edit().putInt("x", p.x).putInt("y", p.y).putInt("preset", position).apply() } catch (_: Exception) { }
+                }
+            }
+            detector.onTouchEvent(e)
+            true
+        }
         val p = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -102,6 +154,14 @@ class OverlayController(private val context: Context, private val onDoubleTap: (
             y = statusBarHeight() + dp(4f)
         }
         position = pos
+        // Restore a spot the user dragged it to (only while the same position preset is selected).
+        try {
+            if (prefs.contains("x") && prefs.getInt("preset", -1) == pos) {
+                p.gravity = Gravity.TOP or Gravity.START
+                p.x = prefs.getInt("x", p.x); p.y = prefs.getInt("y", p.y)
+                absolute = true
+            }
+        } catch (_: Exception) { }
         wm.addView(v, p)
         view = v
         params = p
@@ -109,6 +169,6 @@ class OverlayController(private val context: Context, private val onDoubleTap: (
 
     fun hide() {
         view?.let { try { wm.removeView(it) } catch (_: Exception) { } }
-        view = null; params = null; position = -1; lastText = ""
+        view = null; params = null; position = -1; lastText = ""; absolute = false
     }
 }

@@ -138,11 +138,14 @@ class PresenceService : LifecycleService() {
             },
             onError = { msg -> Engine.reportError(msg) }
         )
-        overlay = OverlayController(this) {
-            // Double-tap on the floating timer = pause / resume
-            Engine.togglePause()
-            refreshOutputs(); evaluateAlarm()
-        }
+        overlay = OverlayController(
+            this,
+            // Double tap toggles: running -> pause, paused -> start immediately
+            onDoubleTap = {
+                if (Engine.isPaused()) startNow()
+                else { Engine.setPaused(true); refreshOutputs(); evaluateAlarm() }
+            }
+        )
         alarm = AlarmPlayer(this)
         createChannel()
         ProcessLifecycleOwner.get().lifecycle.addObserver(processObserver)
@@ -158,13 +161,34 @@ class PresenceService : LifecycleService() {
         when (intent?.action) {
             ACTION_STOP -> shutdown()
             ACTION_TOGGLE_PAUSE -> {
-                if (running) { Engine.togglePause(); refreshOutputs(); evaluateAlarm() }
+                if (running) {
+                    if (Engine.isPaused()) startNow() else { Engine.setPaused(true); refreshOutputs(); evaluateAlarm() }
+                }
             }
             else -> startDetection()
         }
         // STICKY: if the system kills the process, it recreates the service (null intent -> startDetection()).
         // A deliberate Stop calls stopSelf(), which is never restarted.
         return START_STICKY
+    }
+
+    /**
+     * Start / resume the countdown right now. In periodic mode the camera may be asleep until the next
+     * check (e.g. 15 minutes away), so resuming forces an immediate check instead of waiting for it.
+     */
+    private fun startNow() {
+        if (!running) return
+        if (Engine.isPaused()) Engine.setPaused(false)
+        if (periodic && !Engine.isPresent()) {
+            val now = System.currentTimeMillis()
+            if (sleeping) beginCheck(now)
+            else {
+                holding = false; checking = true
+                checkStart = now; checkFirstFrame = 0L
+                Engine.setCheckState(true, false, 0L)
+            }
+        }
+        refreshOutputs(); evaluateAlarm()
     }
 
     /** User swiped the app out of Recents: keep tracking, timer, notification and overlay running. */
