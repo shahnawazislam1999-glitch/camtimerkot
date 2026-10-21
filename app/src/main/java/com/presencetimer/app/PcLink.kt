@@ -66,6 +66,12 @@ object PcLink {
     val notice = MutableStateFlow<String?>(null)
 
     @Volatile var lastFrameAt = 0L
+
+    /**
+     * Periodic mode: false = ask the PC to stop video (webcam released) while the phone sleeps between
+     * checks. The connection itself stays up so the next check starts instantly.
+     */
+    @Volatile var streamEnabled = true
     @Volatile var frameListener: ((ByteArray) -> Unit)? = null
 
     private val lock = Any()
@@ -91,11 +97,12 @@ object PcLink {
                 _status.value = LinkStatus()
                 _preview.value = null
                 lastFrameAt = 0L
+                streamEnabled = true
             }
         }
     }
 
-    internal fun wantsStream(): Boolean = synchronized(lock) { owners.contains("service") }
+    internal fun wantsStream(): Boolean = synchronized(lock) { owners.contains("service") } && streamEnabled
 
     /** Starts looking for a PC that accepts [code] (the 6 digits shown in the PC window). */
     fun beginPairing(ctx: Context, code: String) {
@@ -149,6 +156,7 @@ private const val T_PING = 6
 private const val T_PONG = 7
 private const val T_STATUS = 8
 private const val T_START = 10
+private const val T_STOP = 11
 
 private const val R_FAILED = 0
 private const val R_ENDED = 1
@@ -565,9 +573,11 @@ private class PcClient(private val ctx: Context) {
                 try {
                     while (alive.get() && !stopped) {
                         Thread.sleep(500)
-                        if (!startSent.get() && PcLink.wantsStream()) {
-                            send(out, T_START, "{}".toByteArray())
-                            startSent.set(true)
+                        // Keep the PC's video in sync with what the phone wants (START / STOP).
+                        val want = PcLink.wantsStream()
+                        if (want != startSent.get()) {
+                            send(out, if (want) T_START else T_STOP, "{}".toByteArray())
+                            startSent.set(want)
                         }
                         if (++i % 4 == 0) send(out, T_PING, ByteArray(0))
                         if (SystemClock.elapsedRealtime() - lastRx.get() > 4500) {

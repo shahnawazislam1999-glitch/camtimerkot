@@ -47,3 +47,28 @@ on the PC, then in the app choose *Camera source -> PC camera -> Pair with PC* a
 The phone receives the frames and does the same face + body detection. It finds the PC automatically
 (UDP beacon, last address, USB loopback, subnet scan) and reconnects by itself after Wi-Fi/hotspot changes.
 While the link is down the timer pauses and no "person missing" alarm sounds.
+
+
+## Periodic detection (v1.2) - saves battery / CPU
+Instead of watching the camera all the time, open **Periodic detection** in the app, switch it on and type a
+number, then pick **Seconds** or **Minutes** (e.g. `10` + Minutes, or `60` + Seconds) and press **Apply**.
+
+* Press Start: the camera does a first check right away (a few seconds), then **switches off completely**
+  (phone camera released / PC webcam released, no face or body processing).
+* After every interval it wakes up once, looks for a person, and goes back to sleep.
+* **Person found** at a check: the timer keeps running until the next check.
+  **Nobody found**: the timer stops at that check and the next check comes after the interval.
+* Change the number or unit at any time, even while detecting: the new interval is used immediately.
+  (If the new interval is shorter than the time already slept, a check happens right away.)
+* Allowed range: 10-3600 seconds or 1-1440 minutes.
+* Alarms: the *person-missing* alarm keeps the camera awake until the person is back; the
+  *human-detected* alarm only sounds while the camera is awake (during a check).
+* PC camera mode: the phone tells the PC to release the webcam between checks (needs PresenceCam 1.2+; an older
+  PresenceCam still works, the phone just ignores its frames while sleeping).
+
+Note: the app keeps a small CPU wake lock so checks happen on time with the screen off; everything heavy
+(camera + ML Kit) is off while sleeping.
+
+## PC server (background mode)
+See `PresenceTimerServer/README.md`: `start.bat` runs it hidden (closing the window does not stop it), running it
+again does nothing, `stop-server.bat` stops it, and it searches for the phone in FULL mode until the phone connects.

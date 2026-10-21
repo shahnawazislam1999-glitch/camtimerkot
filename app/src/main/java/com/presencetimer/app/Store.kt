@@ -23,11 +23,25 @@ data class AppSettings(
     val humanAlarmEnabled: Boolean = false,     // human-detected alarm
     val overlayEnabled: Boolean = false,        // floating timer over other apps
     val overlayPosition: Int = 1,               // 0 = left, 1 = center, 2 = right
-    val cameraSource: Int = 0                   // 0 = phone camera, 1 = PC camera (PresenceCam)
+    val cameraSource: Int = 0,                  // 0 = phone camera, 1 = PC camera (PresenceCam)
+    val periodicEnabled: Boolean = false,       // look for a human only once every N seconds/minutes
+    val periodicValue: Int = 10,                // N
+    val periodicUnit: Int = AppSettings.UNIT_MINUTES
 ) {
+    /** Time between two camera checks in periodic mode. */
+    val periodicIntervalMs: Long
+        get() = periodicValue.toLong() * (if (periodicUnit == UNIT_SECONDS) 1000L else 60_000L)
+
     companion object {
         const val SOURCE_PHONE = 0
         const val SOURCE_PC = 1
+        const val UNIT_SECONDS = 0
+        const val UNIT_MINUTES = 1
+
+        /** Allowed range: 10 s .. 60 min in seconds mode, 1 .. 1440 min (24 h) in minutes mode. */
+        fun minValue(unit: Int) = if (unit == UNIT_SECONDS) 10 else 1
+        fun maxValue(unit: Int) = if (unit == UNIT_SECONDS) 3600 else 1440
+        fun clampValue(value: Int, unit: Int) = value.coerceIn(minValue(unit), maxValue(unit))
     }
 }
 
@@ -109,8 +123,11 @@ object Store {
                 humanAlarmEnabled = rawSettings.optBoolean("humanDetectedAlarmEnabled", false),
                 overlayEnabled = rawSettings.optBoolean("overlayEnabled", false),
                 overlayPosition = rawSettings.optInt("overlayPosition", 1).coerceIn(0, 2),
-                cameraSource = rawSettings.optInt("cameraSource", 0).coerceIn(0, 1)
-            )
+                cameraSource = rawSettings.optInt("cameraSource", 0).coerceIn(0, 1),
+                periodicEnabled = rawSettings.optBoolean("periodicEnabled", false),
+                periodicUnit = rawSettings.optInt("periodicUnit", AppSettings.UNIT_MINUTES)
+                    .coerceIn(AppSettings.UNIT_SECONDS, AppSettings.UNIT_MINUTES)
+            ).let { it.copy(periodicValue = AppSettings.clampValue(rawSettings.optInt("periodicValue", 10), it.periodicUnit)) }
             pairingFlow.value = readPairing()
         }
     }
@@ -129,6 +146,9 @@ object Store {
             rawSettings.put("overlayEnabled", s.overlayEnabled)
             rawSettings.put("overlayPosition", s.overlayPosition)
             rawSettings.put("cameraSource", s.cameraSource)
+            rawSettings.put("periodicEnabled", s.periodicEnabled)
+            rawSettings.put("periodicValue", s.periodicValue)
+            rawSettings.put("periodicUnit", s.periodicUnit)
             prefs.edit().putString(KEY_SETTINGS, rawSettings.toString()).apply()
             settingsFlow.update { s }
         }

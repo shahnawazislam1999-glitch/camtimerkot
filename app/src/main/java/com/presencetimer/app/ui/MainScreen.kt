@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -47,9 +48,11 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
@@ -143,6 +146,8 @@ fun MainScreen(lifecycle: Lifecycle, perms: PermState, pendingImportLabel: Strin
                 }
 
                 PcSourceCard(settings, live.detecting)
+
+                PeriodicCard(settings, live)
 
                 // Controls
                 Card {
@@ -395,15 +400,17 @@ private fun CameraCard(live: LiveState, lifecycle: Lifecycle) {
                     style = Stroke(3.dp.toPx()))
                 drawContext.canvas.nativeCanvas.drawText(b.label, x + 4.dp.toPx(), maxOf(y - 5.dp.toPx(), 14.dp.toPx()), paint)
             }
-            if (live.detecting) {
+            if (live.detecting && !live.sleeping) {
                 live.faces.forEach { draw(it, Green) }
                 live.body?.let { draw(it, Blue) }
             }
         }
+        Box(Modifier.align(Alignment.Center)) { SleepBadge(live) }
         Box(Modifier.align(Alignment.BottomStart).padding(12.dp).clip(RoundedCornerShape(8.dp))
             .background(Color(0xC7000000)).border(1.dp, Color(0xFF252525), RoundedCornerShape(8.dp))
             .padding(horizontal = 9.dp, vertical = 6.dp)) {
-            Text(live.detectionText, color = Color(0xFFDDDDDD), fontSize = 12.sp)
+            Text(if (live.detecting && live.sleeping) "Camera asleep (saving power)" else live.detectionText,
+                color = Color(0xFFDDDDDD), fontSize = 12.sp)
         }
     }
 }
@@ -610,7 +617,7 @@ private fun PcCameraCard(live: LiveState) {
     val link by PcLink.status.collectAsStateWithLifecycle()
     val b = bmp
     val ratio = if (b != null && b.height > 0) b.width.toFloat() / b.height.toFloat() else 4f / 3f
-    val showVideo = b != null && live.detecting && link.state == LinkState.STREAMING
+    val showVideo = b != null && live.detecting && !live.sleeping && link.state == LinkState.STREAMING
 
     Box(Modifier.fillMaxWidth().aspectRatio(ratio).clip(RoundedCornerShape(20.dp))
         .background(Bg).border(1.dp, Border, RoundedCornerShape(20.dp))) {
@@ -640,10 +647,93 @@ private fun PcCameraCard(live: LiveState) {
                 live.body?.let { draw(it, Blue) }
             }
         }
+        Box(Modifier.align(Alignment.Center)) { SleepBadge(live) }
         Box(Modifier.align(Alignment.BottomStart).padding(12.dp).clip(RoundedCornerShape(8.dp))
             .background(Color(0xC7000000)).border(1.dp, Color(0xFF252525), RoundedCornerShape(8.dp))
             .padding(horizontal = 9.dp, vertical = 6.dp)) {
-            Text(live.detectionText, color = Color(0xFFDDDDDD), fontSize = 12.sp)
+            Text(if (live.detecting && live.sleeping) "Camera asleep (saving power)" else live.detectionText,
+                color = Color(0xFFDDDDDD), fontSize = 12.sp)
+        }
+    }
+}
+
+// ---------------------------------------------------------------- periodic detection
+
+/** "Camera asleep - next check in mm:ss" badge; draws nothing unless the camera is sleeping. */
+@Composable
+private fun SleepBadge(live: LiveState) {
+    if (!(live.detecting && live.periodic && live.sleeping)) return
+    val now by ticker.collectAsStateWithLifecycle(initialValue = System.currentTimeMillis())
+    Box(Modifier.clip(RoundedCornerShape(12.dp)).background(Color(0xCC000000))
+        .border(1.dp, Color(0xFF2A2A2A), RoundedCornerShape(12.dp)).padding(horizontal = 14.dp, vertical = 10.dp)) {
+        Text("😴 Camera asleep\nNext check in ${Fmt.time(maxOf(0L, live.nextCheckAtMs - now))}",
+            color = Color(0xFFDDDDDD), fontSize = 13.sp, textAlign = TextAlign.Center)
+    }
+}
+
+@Composable
+private fun PeriodicCard(settings: AppSettings, live: LiveState) {
+    val now by ticker.collectAsStateWithLifecycle(initialValue = System.currentTimeMillis())
+    val focus = LocalFocusManager.current
+    var text by remember(settings.periodicValue, settings.periodicUnit) {
+        mutableStateOf(settings.periodicValue.toString())
+    }
+    val unitName = if (settings.periodicUnit == AppSettings.UNIT_SECONDS) "seconds" else "minutes"
+
+    // Applies instantly, also while detection is running: the service reads the interval every second.
+    fun applyInterval(unit: Int) {
+        val value = AppSettings.clampValue(text.toIntOrNull() ?: settings.periodicValue, unit)
+        text = value.toString()
+        Store.updateSettings { it.copy(periodicValue = value, periodicUnit = unit) }
+        focus.clearFocus()
+    }
+
+    Card {
+        SectionTitle("Periodic detection (saves battery)")
+        ToggleRow(
+            "Check for a human only every…",
+            "The camera wakes up once per interval, looks for a person for a few seconds, then switches off " +
+                "completely. Person found: the timer keeps running until the next check. Nobody found: the timer " +
+                "stops. The first check happens as soon as you press Start.",
+            settings.periodicEnabled
+        ) { v -> Store.updateSettings { it.copy(periodicEnabled = v) } }
+
+        if (settings.periodicEnabled) {
+            Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { v -> text = v.filter { ch -> ch.isDigit() }.take(4) },
+                    singleLine = true,
+                    label = { Text("Every") },
+                    modifier = Modifier.weight(1f),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { applyInterval(settings.periodicUnit) })
+                )
+                Btn("Apply", modifier = Modifier.widthIn(min = 90.dp)) { applyInterval(settings.periodicUnit) }
+            }
+            Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Chip("Seconds", settings.periodicUnit == AppSettings.UNIT_SECONDS, Modifier.weight(1f)) {
+                    applyInterval(AppSettings.UNIT_SECONDS)
+                }
+                Chip("Minutes", settings.periodicUnit == AppSettings.UNIT_MINUTES, Modifier.weight(1f)) {
+                    applyInterval(AppSettings.UNIT_MINUTES)
+                }
+            }
+            Text("Camera checks every ${settings.periodicValue} $unitName", fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 10.dp))
+            if (live.detecting && live.periodic) {
+                val line = when {
+                    live.checking -> "🔍 Checking the camera now…"
+                    live.sleeping -> "😴 Camera asleep • next check in ${Fmt.time(maxOf(0L, live.nextCheckAtMs - now))}"
+                    else -> null
+                }
+                if (line != null) Text(line, color = Green, fontSize = 12.5.sp, modifier = Modifier.padding(top = 3.dp))
+            }
+            Text("Allowed: 10–3600 seconds or 1–1440 minutes. You can change it while detection is running. " +
+                "The person-missing alarm keeps the camera awake until the person is back; the human-detected " +
+                "alarm only sounds while the camera is awake.",
+                color = Muted, fontSize = 11.5.sp, modifier = Modifier.padding(top = 6.dp))
         }
     }
 }

@@ -30,7 +30,12 @@ data class LiveState(
     val alarmPlayingText: String? = null,
     val faces: List<NBox> = emptyList(),
     val body: NBox? = null,
-    val error: String? = null
+    val error: String? = null,
+    // Periodic ("check every N") mode
+    val periodic: Boolean = false,
+    val checking: Boolean = false,      // camera is on right now, looking for a human
+    val sleeping: Boolean = false,      // camera is off until nextCheckAtMs
+    val nextCheckAtMs: Long = 0
 ) {
     fun displayMs(now: Long): Long =
         accumulatedMs + if (present && detecting && sessionStartMs > 0) maxOf(0L, now - sessionStartMs) else 0L
@@ -64,6 +69,7 @@ object Engine {
     private var lastFrameHuman = false
     private var lastSaveAt = 0L
     private var lastNotifyAt = 0L
+    private var periodic = false
     private val recentWeak = ArrayDeque<Int>()
 
     fun init() {
@@ -92,25 +98,63 @@ object Engine {
 
     // ---------- lifecycle ----------
 
-    fun startDetection() {
+    fun startDetection(periodicMode: Boolean = false) {
         synchronized(lock) {
+            periodic = periodicMode
             detecting = true; present = false
             firstSeen = 0; lastSeen = 0; sessionStart = 0; dailyCursor = 0
             recentWeak.clear(); personWasSeen = false
             lastFrameAt = 0; lastFrameHuman = false
             publish { it.copy(status = "🟡 Looking for face or body...", statusKind = StatusKind.IDLE,
-                detectionText = "Camera active", error = null, faces = emptyList(), body = null) }
+                detectionText = "Camera active", error = null, faces = emptyList(), body = null,
+                periodic = periodicMode, checking = periodicMode, sleeping = false, nextCheckAtMs = 0) }
         }
     }
 
+    /** Switches periodic mode on/off while detection keeps running. */
+    fun setPeriodic(on: Boolean, now: Long = System.currentTimeMillis()) {
+        synchronized(lock) {
+            if (periodic == on) return
+            periodic = on
+            // Continuous mode judges "frames stopped" from lastSeen: give the camera a fresh grace period.
+            if (!on && present) lastSeen = now
+            publish { it.copy(periodic = on, checking = on, sleeping = false, nextCheckAtMs = 0) }
+        }
+    }
+
+    /** Service tells the UI whether the camera is checking, sleeping, and when it wakes up. */
+    fun setCheckState(checking: Boolean, sleeping: Boolean, nextCheckAtMs: Long) {
+        _live.update { it.copy(checking = checking, sleeping = sleeping, nextCheckAtMs = nextCheckAtMs) }
+    }
+
+    fun isPresent(): Boolean = synchronized(lock) { present }
+
+    /**
+     * Periodic mode: a check window ended and nobody was confirmed (or the camera could not see).
+     * The countdown (timer) stops here. [reason] overrides the status text.
+     */
+    fun checkFoundNobody(now: Long, reason: String? = null) {
+        synchronized(lock) {
+            if (!detecting) return
+            if (present) { endSession(now); saveTimerState(now) }
+            firstSeen = 0; lastSeen = 0
+            recentWeak.clear(); lastFrameHuman = false
+            publish { it.copy(
+                status = reason ?: "🔴 Nobody found at the check — Timer stopped",
+                statusKind = StatusKind.PAUSED, detectionText = "Detected: None",
+                faces = emptyList(), body = null) }
+        }
+        Store.notifyChanged()
+    }
     fun stopDetection(now: Long = System.currentTimeMillis()) {
         synchronized(lock) {
             if (!detecting && !present) return
             if (present) { endSession(now); saveTimerState(now) }
-            detecting = false
+            detecting = false; periodic = false
             recentWeak.clear(); personWasSeen = false
             publish { it.copy(status = "⚪ Detection stopped", statusKind = StatusKind.IDLE,
-                detectionText = "Camera stopped", faces = emptyList(), body = null, alarmPlayingText = null) }
+                detectionText = "Camera stopped", faces = emptyList(), body = null, alarmPlayingText = null,
+                periodic = false, checking = false, sleeping = false, nextCheckAtMs = 0) }
         }
         Store.notifyChanged()
     }
@@ -190,7 +234,8 @@ object Engine {
             } else {
                 text = "Detected: None"
                 if (!present && firstSeen != 0L && now - lastSeen >= STOP_DEBOUNCE_MS) firstSeen = 0
-                if (present && now - lastSeen >= STOP_DEBOUNCE_MS) {
+                // Periodic mode: the service decides at the end of the check window instead.
+                if (!periodic && present && now - lastSeen >= STOP_DEBOUNCE_MS) {
                     endSession(now); saveTimerState(now)
                     status = "🔴 No face or body — Timer paused"; kind = StatusKind.PAUSED
                 }
@@ -219,7 +264,7 @@ object Engine {
     fun tick(now: Long) {
         synchronized(lock) {
             if (!detecting) return
-            if (present && now - lastSeen >= STOP_DEBOUNCE_MS) {
+            if (!periodic && present && now - lastSeen >= STOP_DEBOUNCE_MS) {
                 // Frames stopped arriving (camera lost / screen off): close the session cleanly.
                 endSession(now); saveTimerState(now)
                 publish { it.copy(status = "🔴 No face or body — Timer paused", statusKind = StatusKind.PAUSED) }
@@ -231,7 +276,7 @@ object Engine {
                 if (now - lastSaveAt >= 5000) { lastSaveAt = now; saveTimerState(now) }
                 if (now - lastNotifyAt >= 5000) { lastNotifyAt = now; Store.notifyChanged() }
             }
-            if (lastFrameAt != 0L && now - lastFrameAt > 6000) {
+            if (!periodic && lastFrameAt != 0L && now - lastFrameAt > 6000) {
                 publish { it.copy(detectionText = "No camera frames — camera may be used by another app") }
             }
             publish()

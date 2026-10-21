@@ -27,6 +27,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleService
+import androidx.lifecycle.Observer
 import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Job
@@ -49,6 +50,13 @@ class PresenceService : LifecycleService() {
         const val ACTION_STOP = "com.presencetimer.app.STOP"
         private const val CHANNEL_ID = "presence_timer"
         private const val NOTIF_ID = 1001
+
+        /** Periodic mode: how long the camera looks for a human during one check. */
+        private const val CHECK_WINDOW_MS = 6_000L
+        /** Periodic mode: give up on a check if the camera delivers no picture at all. */
+        private const val NO_FRAME_TIMEOUT_MS = 15_000L
+        /** Periodic mode: after a check that could not see anything, retry sooner than the interval. */
+        private const val UNSEEN_RETRY_MS = 30_000L
 
         @Volatile private var instance: PresenceService? = null
         @Volatile private var pendingProvider: Preview.SurfaceProvider? = null
@@ -91,6 +99,28 @@ class PresenceService : LifecycleService() {
     private var pcMode = false
     private val frameBusy = AtomicBoolean(false)
 
+    // ---- periodic ("check every N") mode state, all touched on the main thread except the two flags ----
+    @Volatile private var periodic = false
+    @Volatile private var sleeping = false      // camera/stream off until the next check
+    private var checking = false                // a check window is open
+    private var holding = false                 // nobody found but person-missing alarm is on: stay awake
+    private var checkStart = 0L
+    private var checkFirstFrame = 0L
+    private var sleepFrom = 0L
+    private var sleepLenOverride = 0L           // >0: wake after this instead of the normal interval
+
+    private val camStateObserver = Observer<CameraState> { state ->
+        val err = state.error
+        when {
+            err == null && state.type == CameraState.Type.OPEN -> Engine.reportError(null)
+            err?.code == CameraState.ERROR_CAMERA_IN_USE ->
+                Engine.reportError("Camera is in use by another app.")
+            err?.code == CameraState.ERROR_CAMERA_DISABLED ->
+                Engine.reportError("Camera is disabled (check Android privacy settings).")
+            err != null -> Engine.reportError("Camera error (code ${err.code}).")
+        }
+    }
+
     private val processObserver = object : DefaultLifecycleObserver {
         override fun onStart(owner: LifecycleOwner) { appVisible = true; refreshOutputs() }
         override fun onStop(owner: LifecycleOwner) { appVisible = false; refreshOutputs() }
@@ -103,7 +133,7 @@ class PresenceService : LifecycleService() {
         analyzer = PresenceAnalyzer(
             onResult = { r ->
                 Engine.onFrame(r, System.currentTimeMillis())
-                mainHandler.post { evaluateAlarm() }
+                mainHandler.post { onFrameAnalyzed(); evaluateAlarm() }
             },
             onError = { msg -> Engine.reportError(msg) }
         )
@@ -114,7 +144,7 @@ class PresenceService : LifecycleService() {
 
         // React to settings changes (overlay on/off, alarm toggles) while running.
         lifecycleScope.launch {
-            Store.settingsFlow.collect { refreshOutputs(); evaluateAlarm() }
+            Store.settingsFlow.collect { syncPeriodicMode(); refreshOutputs(); evaluateAlarm() }
         }
     }
 
@@ -157,7 +187,11 @@ class PresenceService : LifecycleService() {
         }
 
         running = true
-        Engine.startDetection()
+        periodic = Store.settingsFlow.value.periodicEnabled
+        sleeping = false; holding = false
+        checking = periodic
+        checkStart = System.currentTimeMillis(); checkFirstFrame = 0L
+        Engine.startDetection(periodic)
         acquireWakeLock()
         if (pcMode) startPcSource() else bindCamera()
 
@@ -166,6 +200,7 @@ class PresenceService : LifecycleService() {
             while (isActive) {
                 val now = System.currentTimeMillis()
                 Engine.tick(now)
+                periodicTick(now)
                 refreshOutputs()
                 evaluateAlarm()
                 delay(1000 - (now % 1000))   // align updates to the second
@@ -193,6 +228,7 @@ class PresenceService : LifecycleService() {
     private fun startPcSource() {
         analyzer.mirror = false
         frameBusy.set(false)
+        PcLink.streamEnabled = true
         PcLink.frameListener = { bytes -> onPcFrame(bytes) }
         PcLink.acquire(this, "service")
     }
@@ -204,7 +240,7 @@ class PresenceService : LifecycleService() {
 
     /** Runs on the link's reader thread: decode + detect the newest frame, drop frames while busy. */
     private fun onPcFrame(bytes: ByteArray) {
-        if (!running || !frameBusy.compareAndSet(false, true)) return
+        if (!running || (periodic && sleeping) || !frameBusy.compareAndSet(false, true)) return
         try {
             analysisExecutor.execute {
                 try {
@@ -226,6 +262,7 @@ class PresenceService : LifecycleService() {
 
     private fun shutdown() {
         running = false
+        periodic = false; sleeping = false; checking = false; holding = false
         tickJob?.cancel()
         Engine.stopDetection()
         setAlarm(null)
@@ -285,20 +322,17 @@ class PresenceService : LifecycleService() {
                 preview = pv
                 applyPreview()
 
-                camera.cameraInfo.cameraState.observe(this) { state ->
-                    val err = state.error
-                    when {
-                        err == null && state.type == CameraState.Type.OPEN -> Engine.reportError(null)
-                        err?.code == CameraState.ERROR_CAMERA_IN_USE ->
-                            Engine.reportError("Camera is in use by another app.")
-                        err?.code == CameraState.ERROR_CAMERA_DISABLED ->
-                            Engine.reportError("Camera is disabled (check Android privacy settings).")
-                        err != null -> Engine.reportError("Camera error (code ${err.code}).")
-                    }
-                }
+                // Same observer instance every time, so re-binding after a sleep never stacks observers.
+                camera.cameraInfo.cameraState.observe(this, camStateObserver)
             } catch (e: Exception) {
-                Engine.reportError("Camera error: ${e.message ?: e.javaClass.simpleName}")
-                shutdown()
+                val msg = "Camera error: ${e.message ?: e.javaClass.simpleName}"
+                Engine.reportError(msg)
+                if (periodic && e !is IllegalStateException) {
+                    // A temporary problem (e.g. camera busy): count this check as "could not see", try again later.
+                    finishCheck(false, System.currentTimeMillis(), "⚠️ Camera unavailable — timer paused, will retry")
+                } else {
+                    shutdown()
+                }
             }
         }, ContextCompat.getMainExecutor(this))
     }
@@ -320,10 +354,111 @@ class PresenceService : LifecycleService() {
         wakeLock = null
     }
 
+    // ---------- periodic ("check every N seconds/minutes") mode ----------
+    //
+    // Cycle: CHECK (camera/stream on, ML runs, up to CHECK_WINDOW_MS) -> SLEEP (camera/stream off,
+    // no ML, almost no CPU) -> next CHECK after the interval. Human found at a check: the timer keeps
+    // running through the sleep. Nobody found: the timer stops there. The interval is read from the
+    // settings on every tick, so changing it while running takes effect immediately.
+
+    private fun nextCheckAt(): Long =
+        sleepFrom + (if (sleepLenOverride > 0L) sleepLenOverride else Store.settingsFlow.value.periodicIntervalMs)
+
+    /** Settings changed while running: switch periodic mode on/off without stopping detection. */
+    private fun syncPeriodicMode() {
+        if (!running) return
+        val want = Store.settingsFlow.value.periodicEnabled
+        if (want == periodic) return
+        val now = System.currentTimeMillis()
+        if (want) {
+            periodic = true
+            checking = true; sleeping = false; holding = false
+            checkStart = now; checkFirstFrame = 0L
+            Engine.setPeriodic(true, now)
+            Engine.setCheckState(true, false, 0L)
+        } else {
+            val wasSleeping = sleeping
+            periodic = false
+            checking = false; sleeping = false; holding = false
+            Engine.setPeriodic(false, now)
+            Engine.setCheckState(false, false, 0L)
+            if (wasSleeping) wakeSource()
+        }
+    }
+
+    private fun wakeSource() {
+        if (pcMode) PcLink.streamEnabled = true else bindCamera()
+    }
+
+    private fun sleepSource() {
+        if (pcMode) {
+            PcLink.streamEnabled = false          // PC releases its webcam; link stays connected
+        } else {
+            try { cameraProvider?.unbindAll() } catch (_: Exception) { }   // camera light off, no frames
+            preview = null
+        }
+    }
+
+    private fun beginCheck(now: Long) {
+        checking = true; sleeping = false; holding = false
+        checkStart = now; checkFirstFrame = 0L
+        Engine.setCheckState(true, false, 0L)
+        wakeSource()
+    }
+
+    private fun enterSleep(now: Long, retryAfterMs: Long) {
+        checking = false; holding = false; sleeping = true
+        sleepFrom = now; sleepLenOverride = retryAfterMs
+        sleepSource()
+        setAlarm(null)
+        Engine.setCheckState(false, true, nextCheckAt())
+    }
+
+    /** found = a human was confirmed. Otherwise the window ended empty ([unseenReason] = camera gave no picture). */
+    private fun finishCheck(found: Boolean, now: Long, unseenReason: String? = null) {
+        if (!periodic || !checking) return
+        if (found) { enterSleep(now, 0L); return }
+        val s = Store.settingsFlow.value
+        // Person-missing alarm ON: don't sleep, keep watching until the person is back.
+        val keepAwake = unseenReason == null && s.alarmEnabled && Engine.personWasSeen()
+        Engine.checkFoundNobody(now, unseenReason)
+        if (keepAwake) { holding = true; return }
+        val retry = if (unseenReason != null) minOf(s.periodicIntervalMs, UNSEEN_RETRY_MS) else 0L
+        enterSleep(now, retry)
+    }
+
+    /** Main thread, after every analyzed frame. */
+    private fun onFrameAnalyzed() {
+        if (!periodic || !checking) return
+        val now = System.currentTimeMillis()
+        if (checkFirstFrame == 0L) checkFirstFrame = now
+        if (Engine.isPresent() && Engine.humanNow(now)) {
+            holding = false
+            finishCheck(true, now)
+        }
+    }
+
+    /** Once per second. */
+    private fun periodicTick(now: Long) {
+        if (!periodic) return
+        if (checking) {
+            if (holding) return
+            val noPicture = checkFirstFrame == 0L && now - checkStart >= NO_FRAME_TIMEOUT_MS
+            val windowOver = checkFirstFrame != 0L && now - checkFirstFrame >= CHECK_WINDOW_MS
+            if (noPicture) finishCheck(false, now, "⚠️ No camera picture — timer paused, will retry")
+            else if (windowOver) finishCheck(false, now)
+        } else if (sleeping) {
+            val next = nextCheckAt()
+            Engine.setCheckState(false, true, next)
+            if (now >= next) beginCheck(now)
+        }
+    }
+
     // ---------- alarm ----------
 
     private fun evaluateAlarm() {
         if (!running) { setAlarm(null); return }
+        if (periodic && sleeping) { setAlarm(null); return }   // camera is off between checks
         val s = Store.settingsFlow.value
         val now = System.currentTimeMillis()
         // PC link down (network switch, PC asleep): we simply cannot see anyone, so never sound a false alarm.
@@ -377,7 +512,11 @@ class PresenceService : LifecycleService() {
     }
 
     private fun buildNotification(now: Long, live: LiveState): Notification {
+        val nextIn = if (live.nextCheckAtMs > 0) Fmt.time(live.nextCheckAtMs - now) else ""
         val text = when {
+            live.detecting && live.periodic && live.sleeping ->
+                (if (live.present) "🟢 Timer running" else "🔴 Timer stopped") + " • camera asleep • next check in $nextIn"
+            live.detecting && live.periodic && live.checking && !live.present -> "🔍 Checking camera…"
             pcMode && live.detecting && !PcLink.framesFlowing(now) -> "🟠 PC camera not connected — timer paused"
             live.detecting && live.present -> "🟢 Human detected — timer running"
             live.detecting && live.statusKind == StatusKind.PAUSED -> "🔴 No face or body — timer paused"
