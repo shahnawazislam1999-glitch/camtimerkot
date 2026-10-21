@@ -6,6 +6,7 @@ import androidx.camera.view.PreviewView
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -21,9 +22,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -40,11 +43,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -53,10 +59,13 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.presencetimer.app.AppSettings
 import com.presencetimer.app.Engine
 import com.presencetimer.app.Fmt
+import com.presencetimer.app.LinkState
 import com.presencetimer.app.LiveState
 import com.presencetimer.app.NBox
+import com.presencetimer.app.PcLink
 import com.presencetimer.app.PresenceService
 import com.presencetimer.app.StatusKind
 import com.presencetimer.app.Store
@@ -121,7 +130,10 @@ fun MainScreen(lifecycle: Lifecycle, perms: PermState, pendingImportLabel: Strin
 
                 StatusPill(live)
 
-                if (!settings.hideCamera) CameraCard(live, lifecycle)
+                if (!settings.hideCamera) {
+                    if (settings.cameraSource == AppSettings.SOURCE_PC) PcCameraCard(live)
+                    else CameraCard(live, lifecycle)
+                }
 
                 live.error?.let {
                     Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(Color(0xF0320005))
@@ -129,6 +141,8 @@ fun MainScreen(lifecycle: Lifecycle, perms: PermState, pendingImportLabel: Strin
                         Text(it, fontSize = 12.5.sp)
                     }
                 }
+
+                PcSourceCard(settings, live.detecting)
 
                 // Controls
                 Card {
@@ -163,7 +177,9 @@ fun MainScreen(lifecycle: Lifecycle, perms: PermState, pendingImportLabel: Strin
                     }
                 }
 
-                Btn(if (live.detecting) "Stop Detection" else "Allow Camera & Start",
+                Btn(if (live.detecting) "Stop Detection"
+                        else if (settings.cameraSource == AppSettings.SOURCE_PC) "Start (PC camera)"
+                        else "Allow Camera & Start",
                     bg = if (live.detecting) Color(0xFF271016) else Accent,
                     border = if (live.detecting) RedC.copy(alpha = .5f) else Accent,
                     color = if (live.detecting) Color(0xFFFF8A9C) else Color.White,
@@ -173,7 +189,7 @@ fun MainScreen(lifecycle: Lifecycle, perms: PermState, pendingImportLabel: Strin
                     Btn("Reset Timer", modifier = Modifier.weight(1f), onClick = actions.onReset)
                 }
 
-                PermissionsCard(perms, actions)
+                PermissionsCard(perms, actions, settings.cameraSource == AppSettings.SOURCE_PC)
 
                 // Study overview
                 Card {
@@ -393,10 +409,10 @@ private fun CameraCard(live: LiveState, lifecycle: Lifecycle) {
 }
 
 @Composable
-private fun PermissionsCard(p: PermState, a: Actions) {
+private fun PermissionsCard(p: PermState, a: Actions, pcMode: Boolean) {
     Card {
         SectionTitle("Permissions")
-        PermRow("Camera", "Face & body detection", p.camera, a.onCameraPerm)
+        if (!pcMode) PermRow("Camera", "Face & body detection", p.camera, a.onCameraPerm)
         if (Build.VERSION.SDK_INT >= 33) PermRow("Notifications", "Timer in the notification panel", p.notifications, a.onNotifPerm)
         PermRow("Display over other apps", "Tiny dim timer on top of apps", p.overlay, a.onOverlayPerm)
         PermRow("Unrestricted battery", "Keeps tracking alive in background", p.battery, a.onBatteryPerm)
@@ -491,5 +507,143 @@ private fun SmallBtn(text: String, wide: Boolean = false, color: Color = Color(0
         .border(1.dp, Color(0xFF2A2A2A), RoundedCornerShape(9.dp)).clickable(onClick = onClick),
         contentAlignment = Alignment.Center) {
         Text(text, color = color, fontSize = if (wide) 12.sp else 17.sp)
+    }
+}
+
+
+// ---------------------------------------------------------------- PC camera
+
+@Composable
+private fun PcSourceCard(settings: AppSettings, detecting: Boolean) {
+    val ctx = LocalContext.current
+    val link by PcLink.status.collectAsStateWithLifecycle()
+    val pairing by Store.pairingFlow.collectAsStateWithLifecycle()
+    val notice by PcLink.notice.collectAsStateWithLifecycle()
+    var showCode by remember { mutableStateOf(false) }
+    var code by remember { mutableStateOf("") }
+    val pc = settings.cameraSource == AppSettings.SOURCE_PC
+
+    Card {
+        SectionTitle("Camera source")
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Chip("Phone camera", !pc, Modifier.weight(1f)) {
+                if (!detecting) Store.updateSettings { it.copy(cameraSource = AppSettings.SOURCE_PHONE) }
+            }
+            Chip("PC camera", pc, Modifier.weight(1f)) {
+                if (!detecting) Store.updateSettings { it.copy(cameraSource = AppSettings.SOURCE_PC) }
+            }
+        }
+        if (detecting) {
+            Text("Stop detection to change the camera source.", color = Muted, fontSize = 11.5.sp,
+                modifier = Modifier.padding(top = 6.dp))
+        }
+        if (pc) {
+            Spacer(Modifier.height(10.dp))
+            Text(
+                if (pairing != null) "Paired PC: ${pairing!!.pcName}" else "No PC paired yet",
+                fontSize = 14.sp, fontWeight = FontWeight.SemiBold
+            )
+            if (link.state != LinkState.OFF) {
+                val c = when (link.state) {
+                    LinkState.STREAMING -> Green
+                    LinkState.CONNECTING -> Color(0xFFC6A9FF)
+                    else -> Color(0xFFFFB454)
+                }
+                Text(link.text, color = c, fontSize = 12.5.sp, modifier = Modifier.padding(top = 4.dp))
+                link.note?.let { Text(it, color = RedC, fontSize = 12.sp, modifier = Modifier.padding(top = 3.dp)) }
+            }
+            notice?.let { Text(it, color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp)) }
+            Row(Modifier.fillMaxWidth().padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Btn(if (pairing == null) "Pair with PC" else "Pair new PC", modifier = Modifier.weight(1f)) {
+                    code = ""; showCode = true
+                }
+                if (pairing != null && !detecting) {
+                    Btn("Test link", modifier = Modifier.weight(1f)) { PcLink.testConnection(ctx) }
+                }
+            }
+            if (pairing != null) {
+                Row(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+                    Btn("Forget this PC", modifier = Modifier.fillMaxWidth(), color = RedC) { PcLink.forgetPc() }
+                }
+            }
+            Text(
+                "Run PresenceCam on the PC (laptop camera is used only while this app is detecting). " +
+                "Pair once with the 6-digit code shown there. The phone then finds the PC by itself and " +
+                "reconnects automatically when you change Wi-Fi or hotspot - both devices just need to be on the same network.",
+                color = Muted, fontSize = 11.5.sp, modifier = Modifier.padding(top = 10.dp)
+            )
+        }
+    }
+
+    if (showCode) {
+        AlertDialog(
+            onDismissRequest = { showCode = false },
+            title = { Text("Pair with PC") },
+            text = {
+                Column {
+                    Text("Enter the 6-digit code shown in the PresenceCam window on your PC.", fontSize = 13.sp)
+                    Spacer(Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = code,
+                        onValueChange = { v -> code = v.filter { ch -> ch.isDigit() }.take(6) },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    if (code.length == 6) {
+                        showCode = false
+                        PcLink.beginPairing(ctx, code)
+                    }
+                }) { Text("Pair") }
+            },
+            dismissButton = { TextButton(onClick = { showCode = false }) { Text("Cancel") } }
+        )
+    }
+}
+
+@Composable
+private fun PcCameraCard(live: LiveState) {
+    val bmp by PcLink.preview.collectAsStateWithLifecycle()
+    val link by PcLink.status.collectAsStateWithLifecycle()
+    val b = bmp
+    val ratio = if (b != null && b.height > 0) b.width.toFloat() / b.height.toFloat() else 4f / 3f
+    val showVideo = b != null && live.detecting && link.state == LinkState.STREAMING
+
+    Box(Modifier.fillMaxWidth().aspectRatio(ratio).clip(RoundedCornerShape(20.dp))
+        .background(Bg).border(1.dp, Border, RoundedCornerShape(20.dp))) {
+        if (showVideo && b != null) {
+            Image(bitmap = b.asImageBitmap(), contentDescription = null,
+                modifier = Modifier.fillMaxSize(), contentScale = ContentScale.FillBounds)
+        } else {
+            Text(
+                if (live.detecting) link.text else "PC camera preview appears here while detecting",
+                color = Muted, fontSize = 13.sp, textAlign = TextAlign.Center,
+                modifier = Modifier.align(Alignment.Center).padding(24.dp)
+            )
+        }
+        androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
+            val paint = android.graphics.Paint().apply {
+                textSize = 13.sp.toPx(); isAntiAlias = true; color = android.graphics.Color.WHITE
+            }
+            fun draw(bx: NBox, c: Color) {
+                val x = bx.l * size.width; val y = bx.t * size.height
+                drawRect(c, androidx.compose.ui.geometry.Offset(x, y),
+                    androidx.compose.ui.geometry.Size((bx.r - bx.l) * size.width, (bx.b - bx.t) * size.height),
+                    style = Stroke(3.dp.toPx()))
+                drawContext.canvas.nativeCanvas.drawText(bx.label, x + 4.dp.toPx(), maxOf(y - 5.dp.toPx(), 14.dp.toPx()), paint)
+            }
+            if (showVideo) {
+                live.faces.forEach { draw(it, Green) }
+                live.body?.let { draw(it, Blue) }
+            }
+        }
+        Box(Modifier.align(Alignment.BottomStart).padding(12.dp).clip(RoundedCornerShape(8.dp))
+            .background(Color(0xC7000000)).border(1.dp, Color(0xFF252525), RoundedCornerShape(8.dp))
+            .padding(horizontal = 9.dp, vertical = 6.dp)) {
+            Text(live.detectionText, color = Color(0xFFDDDDDD), fontSize = 12.sp)
+        }
     }
 }

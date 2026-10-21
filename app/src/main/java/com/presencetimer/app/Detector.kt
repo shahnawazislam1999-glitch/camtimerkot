@@ -1,5 +1,6 @@
 package com.presencetimer.app
 
+import android.graphics.Bitmap
 import android.os.SystemClock
 import androidx.annotation.OptIn
 import androidx.camera.core.ExperimentalGetImage
@@ -62,41 +63,56 @@ class PresenceAnalyzer(
 
         try {
             val image = InputImage.fromMediaImage(media, rotation)
-            val faces = Tasks.await(faceDetector.process(image))
-            val hits = faces.mapNotNull { toHit(it, w, h, flip) }
-
-            var bodyDetected = false
-            var bodyConf = 0f
-            var bodyBox: NBox? = null
-            try {
-                val pose = Tasks.await(poseDetector.process(image))
-                val good = pose.allPoseLandmarks.filter { it.inFrameLikelihood >= BODY_LANDMARK_MIN }
-                val shoulders = listOfNotNull(
-                    pose.getPoseLandmark(PoseLandmark.LEFT_SHOULDER),
-                    pose.getPoseLandmark(PoseLandmark.RIGHT_SHOULDER)
-                ).any { it.inFrameLikelihood >= SHOULDER_MIN }
-                if (good.size >= BODY_MIN_LANDMARKS && shoulders) {
-                    val minX = good.minOf { it.position.x }.coerceIn(0f, w.toFloat())
-                    val maxX = good.maxOf { it.position.x }.coerceIn(0f, w.toFloat())
-                    val minY = good.minOf { it.position.y }.coerceIn(0f, h.toFloat())
-                    val maxY = good.maxOf { it.position.y }.coerceIn(0f, h.toFloat())
-                    val frac = ((maxX - minX) * (maxY - minY)) / (w.toFloat() * h)
-                    if (frac in 0.01f..0.98f) {
-                        bodyDetected = true
-                        bodyConf = good.map { it.inFrameLikelihood }.average().toFloat()
-                        bodyBox = norm(minX, minY, maxX, maxY, w, h, flip, "BODY ${(bodyConf * 100).toInt()}%")
-                    }
-                }
-            } catch (_: Exception) {
-                // Pose model unavailable: face detection alone still works.
-            }
-
-            onResult(FrameResult(hits, bodyDetected, bodyConf, bodyBox))
+            onResult(detect(image, w, h, flip))
         } catch (e: Exception) {
             onError("Detection error: ${e.message ?: e.javaClass.simpleName}")
         } finally {
             proxy.close()
         }
+    }
+
+    /** Frames streamed from the PC webcam (already upright; never mirrored). Caller throttles. */
+    fun analyzeBitmap(bmp: Bitmap) {
+        try {
+            val image = InputImage.fromBitmap(bmp, 0)
+            onResult(detect(image, bmp.width, bmp.height, false))
+        } catch (e: Exception) {
+            onError("Detection error: ${e.message ?: e.javaClass.simpleName}")
+        }
+    }
+
+    /** Shared by the phone camera and the PC camera: face + body detection on one image. */
+    private fun detect(image: InputImage, w: Int, h: Int, flip: Boolean): FrameResult {
+        val faces = Tasks.await(faceDetector.process(image))
+        val hits = faces.mapNotNull { toHit(it, w, h, flip) }
+
+        var bodyDetected = false
+        var bodyConf = 0f
+        var bodyBox: NBox? = null
+        try {
+            val pose = Tasks.await(poseDetector.process(image))
+            val good = pose.allPoseLandmarks.filter { it.inFrameLikelihood >= BODY_LANDMARK_MIN }
+            val shoulders = listOfNotNull(
+                pose.getPoseLandmark(PoseLandmark.LEFT_SHOULDER),
+                pose.getPoseLandmark(PoseLandmark.RIGHT_SHOULDER)
+            ).any { it.inFrameLikelihood >= SHOULDER_MIN }
+            if (good.size >= BODY_MIN_LANDMARKS && shoulders) {
+                val minX = good.minOf { it.position.x }.coerceIn(0f, w.toFloat())
+                val maxX = good.maxOf { it.position.x }.coerceIn(0f, w.toFloat())
+                val minY = good.minOf { it.position.y }.coerceIn(0f, h.toFloat())
+                val maxY = good.maxOf { it.position.y }.coerceIn(0f, h.toFloat())
+                val frac = ((maxX - minX) * (maxY - minY)) / (w.toFloat() * h)
+                if (frac in 0.01f..0.98f) {
+                    bodyDetected = true
+                    bodyConf = good.map { it.inFrameLikelihood }.average().toFloat()
+                    bodyBox = norm(minX, minY, maxX, maxY, w, h, flip, "BODY ${(bodyConf * 100).toInt()}%")
+                }
+            }
+        } catch (_: Exception) {
+            // Pose model unavailable: face detection alone still works.
+        }
+
+        return FrameResult(hits, bodyDetected, bodyConf, bodyBox)
     }
 
     private fun norm(l: Float, t: Float, r: Float, b: Float, w: Int, h: Int, flip: Boolean, label: String): NBox {

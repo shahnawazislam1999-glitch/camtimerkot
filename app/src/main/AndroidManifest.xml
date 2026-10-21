@@ -11,6 +11,14 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <!-- Required on Android 14+ for a foreground service of type "camera" -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <!-- Foreground service type used when the video comes from the PC (no phone camera) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <!-- PC camera mode: talk to PresenceCam over Wi-Fi / hotspot / USB -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
     <!-- Timer in the notification panel (runtime permission on Android 13+) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -53,7 +61,11 @@
         <service
             android:name=".PresenceService"
             android:exported="false"
-            android:foregroundServiceType="camera" />
+            android:foregroundServiceType="camera|specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Receives the laptop camera stream over the local network to detect presence" />
+        </service>
 
     </application>
 </manifest>

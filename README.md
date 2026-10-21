@@ -39,3 +39,11 @@ To build locally: open the folder in Android Studio (Hedgehog or newer) and pres
 ## Data compatibility
 Storage keys and the backup JSON format match the web app. You can **Export** in the web version and
 **Import & Merge** here.
+
+
+## PC camera mode (v1.1)
+Use the **laptop's webcam** instead of the phone camera: run `PresenceCam` (separate folder in the zip)
+on the PC, then in the app choose *Camera source -> PC camera -> Pair with PC* and enter the 6-digit code once.
+The phone receives the frames and does the same face + body detection. It finds the PC automatically
+(UDP beacon, last address, USB loopback, subnet scan) and reconnects by itself after Wi-Fi/hotspot changes.
+While the link is down the timer pauses and no "person missing" alarm sounds.

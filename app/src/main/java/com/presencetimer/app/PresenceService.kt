@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.graphics.BitmapFactory
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -34,6 +35,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Foreground service (type "camera"): keeps face/body tracking and the timer running while the
@@ -86,6 +88,8 @@ class PresenceService : LifecycleService() {
     private var alarmReason: AlarmReason? = null
     private var appVisible = true
     private var running = false
+    private var pcMode = false
+    private val frameBusy = AtomicBoolean(false)
 
     private val processObserver = object : DefaultLifecycleObserver {
         override fun onStart(owner: LifecycleOwner) { appVisible = true; refreshOutputs() }
@@ -128,7 +132,15 @@ class PresenceService : LifecycleService() {
     private fun startDetection() {
         if (running) return
 
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+        pcMode = Store.settingsFlow.value.cameraSource == AppSettings.SOURCE_PC
+        if (pcMode && Store.pairingFlow.value == null) {
+            try { startForegroundCompat() } catch (_: Exception) { }
+            Engine.reportError("Pair with your PC first (Camera source card).")
+            shutdown()
+            return
+        }
+
+        if (!pcMode && ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             // Must still satisfy the startForegroundService() contract before stopping.
             try { startForegroundCompat() } catch (_: Exception) { }
             Engine.reportError("Camera permission denied. Allow it in Settings → Apps → Presence Timer → Permissions.")
@@ -147,7 +159,7 @@ class PresenceService : LifecycleService() {
         running = true
         Engine.startDetection()
         acquireWakeLock()
-        bindCamera()
+        if (pcMode) startPcSource() else bindCamera()
 
         tickJob?.cancel()
         tickJob = lifecycleScope.launch {
@@ -163,10 +175,52 @@ class PresenceService : LifecycleService() {
 
     private fun startForegroundCompat() {
         val n = buildNotification(System.currentTimeMillis(), Engine.live.value)
-        if (Build.VERSION.SDK_INT >= 30) {
-            ServiceCompat.startForeground(this, NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA)
+        if (Build.VERSION.SDK_INT >= 34) {
+            val type = if (pcMode) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                       else ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+            ServiceCompat.startForeground(this, NOTIF_ID, n, type)
+        } else if (Build.VERSION.SDK_INT >= 30) {
+            val type = if (pcMode) ServiceInfo.FOREGROUND_SERVICE_TYPE_MANIFEST
+                       else ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+            ServiceCompat.startForeground(this, NOTIF_ID, n, type)
         } else {
             startForeground(NOTIF_ID, n)
+        }
+    }
+
+    // ---------- PC camera (frames streamed from PresenceCam on the laptop) ----------
+
+    private fun startPcSource() {
+        analyzer.mirror = false
+        frameBusy.set(false)
+        PcLink.frameListener = { bytes -> onPcFrame(bytes) }
+        PcLink.acquire(this, "service")
+    }
+
+    private fun stopPcSource() {
+        PcLink.frameListener = null
+        PcLink.release("service")
+    }
+
+    /** Runs on the link's reader thread: decode + detect the newest frame, drop frames while busy. */
+    private fun onPcFrame(bytes: ByteArray) {
+        if (!running || !frameBusy.compareAndSet(false, true)) return
+        try {
+            analysisExecutor.execute {
+                try {
+                    val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                    if (bmp != null) {
+                        if (appVisible && !Store.settingsFlow.value.hideCamera) PcLink.publishPreview(bmp)
+                        analyzer.analyzeBitmap(bmp)
+                    }
+                } catch (e: Exception) {
+                    Engine.reportError("PC frame error: ${e.message ?: e.javaClass.simpleName}")
+                } finally {
+                    frameBusy.set(false)
+                }
+            }
+        } catch (_: Exception) {
+            frameBusy.set(false)
         }
     }
 
@@ -176,6 +230,7 @@ class PresenceService : LifecycleService() {
         Engine.stopDetection()
         setAlarm(null)
         overlay.hide()
+        stopPcSource()
         try { cameraProvider?.unbindAll() } catch (_: Exception) { }
         releaseWakeLock()
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -191,6 +246,7 @@ class PresenceService : LifecycleService() {
         tickJob?.cancel()
         alarm.stop()
         overlay.hide()
+        stopPcSource()
         try { cameraProvider?.unbindAll() } catch (_: Exception) { }
         analyzer.close()
         analysisExecutor.shutdown()
@@ -270,6 +326,8 @@ class PresenceService : LifecycleService() {
         if (!running) { setAlarm(null); return }
         val s = Store.settingsFlow.value
         val now = System.currentTimeMillis()
+        // PC link down (network switch, PC asleep): we simply cannot see anyone, so never sound a false alarm.
+        if (pcMode && !PcLink.framesFlowing(now)) { setAlarm(null); return }
         val desired: AlarmReason? = when {
             Engine.humanNow(now) -> if (s.humanAlarmEnabled) AlarmReason.DETECTED else null
             Engine.inGrace() -> alarmReason   // brief flicker: keep whatever is happening
@@ -320,6 +378,7 @@ class PresenceService : LifecycleService() {
 
     private fun buildNotification(now: Long, live: LiveState): Notification {
         val text = when {
+            pcMode && live.detecting && !PcLink.framesFlowing(now) -> "🟠 PC camera not connected — timer paused"
             live.detecting && live.present -> "🟢 Human detected — timer running"
             live.detecting && live.statusKind == StatusKind.PAUSED -> "🔴 No face or body — timer paused"
             else -> "🟡 Looking for face or body…"

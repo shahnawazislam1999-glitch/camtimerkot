@@ -36,7 +36,8 @@ class MainActivity : ComponentActivity() {
     private val permLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
             resumeTick++
-            if (granted(Manifest.permission.CAMERA)) {
+            val pc = Store.settingsFlow.value.cameraSource == AppSettings.SOURCE_PC
+            if (pc || granted(Manifest.permission.CAMERA)) {
                 PresenceService.start(this)
             } else {
                 Engine.reportError("Camera permission denied. Open Settings → Apps → Presence Timer → Permissions → Camera → Allow.")
@@ -135,8 +136,13 @@ class MainActivity : ComponentActivity() {
             return
         }
         Engine.reportError(null)
+        val pc = Store.settingsFlow.value.cameraSource == AppSettings.SOURCE_PC
+        if (pc && Store.pairingFlow.value == null) {
+            toast("Pair with your PC first (Camera source card).")
+            return
+        }
         val needed = mutableListOf<String>()
-        if (!granted(Manifest.permission.CAMERA)) needed.add(Manifest.permission.CAMERA)
+        if (!pc && !granted(Manifest.permission.CAMERA)) needed.add(Manifest.permission.CAMERA)
         if (!notifOk()) needed.add(Manifest.permission.POST_NOTIFICATIONS)
         if (needed.isEmpty()) PresenceService.start(this)
         else permLauncher.launch(needed.toTypedArray())

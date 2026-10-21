@@ -22,7 +22,22 @@ data class AppSettings(
     val alarmEnabled: Boolean = false,          // person-missing alarm
     val humanAlarmEnabled: Boolean = false,     // human-detected alarm
     val overlayEnabled: Boolean = false,        // floating timer over other apps
-    val overlayPosition: Int = 1                // 0 = left, 1 = center, 2 = right
+    val overlayPosition: Int = 1,               // 0 = left, 1 = center, 2 = right
+    val cameraSource: Int = 0                   // 0 = phone camera, 1 = PC camera (PresenceCam)
+) {
+    companion object {
+        const val SOURCE_PHONE = 0
+        const val SOURCE_PC = 1
+    }
+}
+
+/** The PC this phone is paired with (secret never leaves the phone / PC). */
+data class PcPairing(
+    val pcId: String,
+    val pcName: String,
+    val secretHex: String,
+    val lastIp: String,
+    val port: Int
 )
 
 data class Stats(
@@ -52,6 +67,9 @@ object Store {
     private var rawSettings = JSONObject()
 
     val settingsFlow = MutableStateFlow(AppSettings())
+
+    /** Paired PC (null = not paired). Kept outside the backup-compatible settings JSON. */
+    val pairingFlow = MutableStateFlow<PcPairing?>(null)
 
     /** Bumped whenever stored data changes so the UI re-reads totals / lists. */
     val version = MutableStateFlow(0)
@@ -90,8 +108,10 @@ object Store {
                 alarmEnabled = rawSettings.optBoolean("alarmEnabled", false),
                 humanAlarmEnabled = rawSettings.optBoolean("humanDetectedAlarmEnabled", false),
                 overlayEnabled = rawSettings.optBoolean("overlayEnabled", false),
-                overlayPosition = rawSettings.optInt("overlayPosition", 1).coerceIn(0, 2)
+                overlayPosition = rawSettings.optInt("overlayPosition", 1).coerceIn(0, 2),
+                cameraSource = rawSettings.optInt("cameraSource", 0).coerceIn(0, 1)
             )
+            pairingFlow.value = readPairing()
         }
     }
 
@@ -108,8 +128,57 @@ object Store {
             rawSettings.put("humanDetectedAlarmEnabled", s.humanAlarmEnabled)
             rawSettings.put("overlayEnabled", s.overlayEnabled)
             rawSettings.put("overlayPosition", s.overlayPosition)
+            rawSettings.put("cameraSource", s.cameraSource)
             prefs.edit().putString(KEY_SETTINGS, rawSettings.toString()).apply()
             settingsFlow.update { s }
+        }
+    }
+
+    // ---------- PC camera pairing ----------
+
+    private const val KEY_PC_PAIRING = "pcCamPairingV1"
+    private const val KEY_DEVICE_ID = "pcCamDeviceIdV1"
+
+    private fun readPairing(): PcPairing? = try {
+        val raw = prefs.getString(KEY_PC_PAIRING, null)
+        if (raw == null) null else {
+            val o = JSONObject(raw)
+            PcPairing(o.getString("pcId"), o.optString("pcName", "PC"), o.getString("secret"),
+                o.optString("lastIp", ""), o.optInt("port", PcLink.TCP_PORT))
+        }
+    } catch (_: Exception) { null }
+
+    /** Stable random id of this phone, used when authenticating to the PC. */
+    fun deviceId(): String = synchronized(lock) {
+        var id = prefs.getString(KEY_DEVICE_ID, null)
+        if (id.isNullOrEmpty()) {
+            id = java.util.UUID.randomUUID().toString().replace("-", "")
+            prefs.edit().putString(KEY_DEVICE_ID, id).apply()
+        }
+        id
+    }
+
+    fun savePairing(p: PcPairing) {
+        synchronized(lock) {
+            val o = JSONObject().put("pcId", p.pcId).put("pcName", p.pcName).put("secret", p.secretHex)
+                .put("lastIp", p.lastIp).put("port", p.port)
+            prefs.edit().putString(KEY_PC_PAIRING, o.toString()).apply()
+            pairingFlow.value = p
+        }
+    }
+
+    fun updateLastIp(ip: String, port: Int) {
+        synchronized(lock) {
+            val p = pairingFlow.value ?: return
+            if (p.lastIp == ip && p.port == port) return
+            savePairing(p.copy(lastIp = ip, port = port))
+        }
+    }
+
+    fun clearPairing() {
+        synchronized(lock) {
+            prefs.edit().remove(KEY_PC_PAIRING).apply()
+            pairingFlow.value = null
         }
     }
 
