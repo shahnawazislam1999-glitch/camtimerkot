@@ -26,7 +26,8 @@ data class AppSettings(
     val cameraSource: Int = 0,                  // 0 = phone camera, 1 = PC camera (PresenceCam)
     val periodicEnabled: Boolean = false,       // look for a human only once every N seconds/minutes
     val periodicValue: Int = 10,                // N
-    val periodicUnit: Int = AppSettings.UNIT_MINUTES
+    val periodicUnit: Int = AppSettings.UNIT_MINUTES,
+    val linkLostAlarmEnabled: Boolean = false   // buzz immediately when the PC camera connection drops
 ) {
     /** Time between two camera checks in periodic mode. */
     val periodicIntervalMs: Long
@@ -125,6 +126,7 @@ object Store {
                 overlayPosition = rawSettings.optInt("overlayPosition", 1).coerceIn(0, 2),
                 cameraSource = rawSettings.optInt("cameraSource", 0).coerceIn(0, 1),
                 periodicEnabled = rawSettings.optBoolean("periodicEnabled", false),
+                linkLostAlarmEnabled = rawSettings.optBoolean("linkLostAlarmEnabled", false),
                 periodicUnit = rawSettings.optInt("periodicUnit", AppSettings.UNIT_MINUTES)
                     .coerceIn(AppSettings.UNIT_SECONDS, AppSettings.UNIT_MINUTES)
             ).let { it.copy(periodicValue = AppSettings.clampValue(rawSettings.optInt("periodicValue", 10), it.periodicUnit)) }
@@ -149,6 +151,7 @@ object Store {
             rawSettings.put("periodicEnabled", s.periodicEnabled)
             rawSettings.put("periodicValue", s.periodicValue)
             rawSettings.put("periodicUnit", s.periodicUnit)
+            rawSettings.put("linkLostAlarmEnabled", s.linkLostAlarmEnabled)
             prefs.edit().putString(KEY_SETTINGS, rawSettings.toString()).apply()
             settingsFlow.update { s }
         }

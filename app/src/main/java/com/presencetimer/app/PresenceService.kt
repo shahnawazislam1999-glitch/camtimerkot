@@ -58,6 +58,8 @@ class PresenceService : LifecycleService() {
         private const val NO_FRAME_TIMEOUT_MS = 15_000L
         /** Periodic mode: after a check that could not see anything, retry sooner than the interval. */
         private const val UNSEEN_RETRY_MS = 30_000L
+        /** PC link-lost alarm: if the PC never connects after Start, arm the alarm after this long. */
+        private const val LINK_FIRST_CONNECT_GRACE_MS = 20_000L
 
         @Volatile private var instance: PresenceService? = null
         @Volatile private var pendingProvider: Preview.SurfaceProvider? = null
@@ -83,7 +85,7 @@ class PresenceService : LifecycleService() {
         }
     }
 
-    private enum class AlarmReason { DETECTED, MISSING }
+    private enum class AlarmReason { DETECTED, MISSING, LINK_LOST }
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var analysisExecutor: ExecutorService
@@ -99,6 +101,11 @@ class PresenceService : LifecycleService() {
     private var running = false
     private var pcMode = false
     private val frameBusy = AtomicBoolean(false)
+
+    // PC link-lost alarm: only armed once the PC has connected (or after a start-up grace period),
+    // so pressing Start does not buzz while the phone is still searching for the PC for the first time.
+    private var linkArmed = false
+    private var startedAt = 0L
 
     // ---- periodic ("check every N") mode state, all touched on the main thread except the two flags ----
     @Volatile private var periodic = false
@@ -153,6 +160,10 @@ class PresenceService : LifecycleService() {
         // React to settings changes (overlay on/off, alarm toggles) while running.
         lifecycleScope.launch {
             Store.settingsFlow.collect { syncPeriodicMode(); refreshOutputs(); evaluateAlarm() }
+        }
+        // React to the PC connection dropping / returning immediately (not only on the 1 s tick).
+        lifecycleScope.launch {
+            PcLink.status.collect { refreshOutputs(); evaluateAlarm() }
         }
     }
 
@@ -230,6 +241,8 @@ class PresenceService : LifecycleService() {
         }
 
         running = true
+        linkArmed = false
+        startedAt = System.currentTimeMillis()
         periodic = Store.settingsFlow.value.periodicEnabled
         sleeping = false; holding = false
         checking = periodic
@@ -501,15 +514,26 @@ class PresenceService : LifecycleService() {
 
     private fun evaluateAlarm() {
         if (!running) { setAlarm(null); return }
-        if (periodic && sleeping) { setAlarm(null); return }   // camera is off between checks
         if (Engine.isPaused()) { setAlarm(null); return }      // manually paused: stay silent
         val s = Store.settingsFlow.value
         val now = System.currentTimeMillis()
-        // PC link down (network switch, PC asleep): we simply cannot see anyone, so never sound a false alarm.
+
+        // PC camera connection lost -> buzz immediately (if the toggle is on). The link stays up while the
+        // camera sleeps in periodic mode, so a dropped link is detected there too.
+        if (pcMode) {
+            val connected = PcLink.status.value.state == LinkState.STREAMING
+            if (connected) linkArmed = true
+            else if (!linkArmed && now - startedAt >= LINK_FIRST_CONNECT_GRACE_MS) linkArmed = true
+            if (s.linkLostAlarmEnabled && linkArmed && !connected) { setAlarm(AlarmReason.LINK_LOST); return }
+        }
+
+        if (periodic && sleeping) { setAlarm(null); return }   // camera is off between checks
+        // PC link down (network switch, PC asleep) and the link-lost alarm is off: we simply cannot see
+        // anyone, so never sound a false "person missing" alarm.
         if (pcMode && !PcLink.framesFlowing(now)) { setAlarm(null); return }
         val desired: AlarmReason? = when {
             Engine.humanNow(now) -> if (s.humanAlarmEnabled) AlarmReason.DETECTED else null
-            Engine.inGrace() -> alarmReason   // brief flicker: keep whatever is happening
+            Engine.inGrace() -> alarmReason?.takeIf { it != AlarmReason.LINK_LOST }   // brief flicker: keep whatever is happening
             s.alarmEnabled && Engine.personWasSeen() -> AlarmReason.MISSING
             else -> null
         }
@@ -525,6 +549,7 @@ class PresenceService : LifecycleService() {
             when (reason) {
                 AlarmReason.DETECTED -> "🚨 ALARM PLAYING • Human detected"
                 AlarmReason.MISSING -> "🚨 ALARM PLAYING • Person missing"
+                AlarmReason.LINK_LOST -> "🚨 ALARM PLAYING • PC camera disconnected"
                 null -> null
             }
         )

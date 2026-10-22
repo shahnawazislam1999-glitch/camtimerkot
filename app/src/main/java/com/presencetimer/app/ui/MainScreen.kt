@@ -98,6 +98,7 @@ fun MainScreen(lifecycle: Lifecycle, perms: PermState, pendingImportLabel: Strin
     val version by Store.version.collectAsStateWithLifecycle()
     var fullscreen by rememberSaveable { mutableStateOf(false) }
     var confirmResetAll by remember { mutableStateOf(false) }
+    var showSettings by rememberSaveable { mutableStateOf(false) }
 
     val stats = remember(version) { Store.stats() }
     val records = remember(version) { Store.recordsSnapshot().asReversed().take(30) }
@@ -106,9 +107,12 @@ fun MainScreen(lifecycle: Lifecycle, perms: PermState, pendingImportLabel: Strin
     }
 
     BackHandler(enabled = fullscreen) { fullscreen = false }
+    BackHandler(enabled = showSettings && !fullscreen) { showSettings = false }
 
     Box(Modifier.fillMaxSize().background(Bg).systemBarsPadding()) {
-        Column(
+        if (showSettings) {
+            SettingsScreen(settings, live, onBack = { showSettings = false })
+        } else Column(
             Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 14.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
@@ -126,7 +130,10 @@ fun MainScreen(lifecycle: Lifecycle, perms: PermState, pendingImportLabel: Strin
                         Text("Face + body detection • on-device processing", color = Muted, fontSize = 12.sp,
                             modifier = Modifier.padding(top = 3.dp))
                     }
-                    Text(if (live.detecting) "LIVE" else "READY", color = if (live.detecting) Green else Muted, fontSize = 12.sp)
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(if (live.detecting) "LIVE" else "READY", color = if (live.detecting) Green else Muted, fontSize = 12.sp)
+                        SmallBtn("⚙") { showSettings = true }
+                    }
                 }
 
                 TimerCard(live) { fullscreen = true }
@@ -145,16 +152,11 @@ fun MainScreen(lifecycle: Lifecycle, perms: PermState, pendingImportLabel: Strin
                     }
                 }
 
-                PcSourceCard(settings, live.detecting)
-
-                PeriodicCard(settings, live)
+                CameraSettingsSummary(settings) { showSettings = true }
 
                 // Controls
                 Card {
                     SectionTitle("Controls")
-                    ToggleRow("Hide camera window",
-                        "Detection continues while the preview is hidden. Timer runs only while a face or body is detected.",
-                        settings.hideCamera) { v -> Store.updateSettings { it.copy(hideCamera = v) } }
                     ToggleRow("🚨 Human-detected alarm",
                         "When ON, the alarm sound starts when a face or body is detected. It stops when the person disappears.",
                         settings.humanAlarmEnabled) { v -> Store.updateSettings { it.copy(humanAlarmEnabled = v) } }
@@ -439,13 +441,13 @@ private fun PermRow(name: String, help: String, ok: Boolean, onGrant: () -> Unit
 }
 
 @Composable
-private fun Card(content: @Composable () -> Unit) {
+internal fun Card(content: @Composable () -> Unit) {
     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(Bg)
         .border(1.dp, Border, RoundedCornerShape(18.dp)).padding(14.dp)) { content() }
 }
 
 @Composable
-private fun SectionTitle(text: String) {
+internal fun SectionTitle(text: String) {
     Text(text, fontSize = 14.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 10.dp))
 }
 
@@ -459,7 +461,7 @@ private fun TitleRow(title: String, actions: @Composable () -> Unit) {
 }
 
 @Composable
-private fun ToggleRow(
+internal fun ToggleRow(
     label: String, help: String, checked: Boolean,
     extra: String? = null, extraColor: Color = Muted, onChange: (Boolean) -> Unit
 ) {
@@ -487,7 +489,7 @@ private fun Stat(label: String, value: String, modifier: Modifier) {
 }
 
 @Composable
-private fun Chip(text: String, selected: Boolean, modifier: Modifier, onClick: () -> Unit) {
+internal fun Chip(text: String, selected: Boolean, modifier: Modifier, onClick: () -> Unit) {
     Box(modifier.clip(RoundedCornerShape(10.dp))
         .background(if (selected) Accent.copy(alpha = .25f) else Panel)
         .border(1.dp, if (selected) Accent else Border, RoundedCornerShape(10.dp))
@@ -497,7 +499,7 @@ private fun Chip(text: String, selected: Boolean, modifier: Modifier, onClick: (
 }
 
 @Composable
-private fun Btn(
+internal fun Btn(
     text: String, modifier: Modifier = Modifier, bg: Color = Panel, border: Color = Color(0xFF2A2A2A),
     color: Color = Color.White, onClick: () -> Unit
 ) {
@@ -521,7 +523,7 @@ private fun SmallBtn(text: String, wide: Boolean = false, color: Color = Color(0
 // ---------------------------------------------------------------- PC camera
 
 @Composable
-private fun PcSourceCard(settings: AppSettings, detecting: Boolean) {
+internal fun PcSourceCard(settings: AppSettings, detecting: Boolean) {
     val ctx = LocalContext.current
     val link by PcLink.status.collectAsStateWithLifecycle()
     val pairing by Store.pairingFlow.collectAsStateWithLifecycle()
@@ -672,7 +674,7 @@ private fun SleepBadge(live: LiveState) {
 }
 
 @Composable
-private fun PeriodicCard(settings: AppSettings, live: LiveState) {
+internal fun PeriodicCard(settings: AppSettings, live: LiveState) {
     val now by ticker.collectAsStateWithLifecycle(initialValue = System.currentTimeMillis())
     val focus = LocalFocusManager.current
     var text by remember(settings.periodicValue, settings.periodicUnit) {
@@ -735,5 +737,28 @@ private fun PeriodicCard(settings: AppSettings, live: LiveState) {
                 "alarm only sounds while the camera is awake.",
                 color = Muted, fontSize = 11.5.sp, modifier = Modifier.padding(top = 6.dp))
         }
+    }
+}
+
+
+/** One compact tappable row on the main screen that opens Settings (replaces the long camera cards). */
+@Composable
+private fun CameraSettingsSummary(settings: AppSettings, onOpen: () -> Unit) {
+    val pc = settings.cameraSource == AppSettings.SOURCE_PC
+    val unit = if (settings.periodicUnit == AppSettings.UNIT_SECONDS) "s" else " min"
+    val parts = buildList {
+        add(if (pc) "PC camera" else "Phone camera")
+        add(if (settings.periodicEnabled) "checks every ${settings.periodicValue}$unit" else "continuous")
+        if (settings.hideCamera) add("preview hidden")
+        if (pc && settings.linkLostAlarmEnabled) add("disconnect alarm on")
+    }
+    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Panel)
+        .border(1.dp, Border, RoundedCornerShape(14.dp)).clickable(onClick = onOpen).padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("Camera settings", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text(parts.joinToString(" • "), color = Muted, fontSize = 11.5.sp, modifier = Modifier.padding(top = 2.dp))
+        }
+        Text("⚙  ›", color = Muted, fontSize = 16.sp)
     }
 }
