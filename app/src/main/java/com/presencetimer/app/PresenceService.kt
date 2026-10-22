@@ -106,6 +106,7 @@ class PresenceService : LifecycleService() {
     // so pressing Start does not buzz while the phone is still searching for the PC for the first time.
     private var linkArmed = false
     private var startedAt = 0L
+    private var linkDown = false                // PC link currently down: timer stopped, searching
 
     // ---- periodic ("check every N") mode state, all touched on the main thread except the two flags ----
     @Volatile private var periodic = false
@@ -163,7 +164,7 @@ class PresenceService : LifecycleService() {
         }
         // React to the PC connection dropping / returning immediately (not only on the 1 s tick).
         lifecycleScope.launch {
-            PcLink.status.collect { refreshOutputs(); evaluateAlarm() }
+            PcLink.status.collect { checkLink(); refreshOutputs(); evaluateAlarm() }
         }
     }
 
@@ -242,6 +243,7 @@ class PresenceService : LifecycleService() {
 
         running = true
         linkArmed = false
+        linkDown = false
         startedAt = System.currentTimeMillis()
         periodic = Store.settingsFlow.value.periodicEnabled
         sleeping = false; holding = false
@@ -256,6 +258,7 @@ class PresenceService : LifecycleService() {
             while (isActive) {
                 val now = System.currentTimeMillis()
                 Engine.tick(now)
+                checkLink(now)
                 periodicTick(now)
                 refreshOutputs()
                 evaluateAlarm()
@@ -470,17 +473,38 @@ class PresenceService : LifecycleService() {
         Engine.setCheckState(false, true, nextCheckAt())
     }
 
+    /**
+     * PC link watchdog (main thread, on every link status change and every second).
+     * Link down  -> main countdown stops immediately, camera/stream stays armed and keeps searching.
+     * Link back  -> detection continues; the countdown restarts as soon as a human is seen.
+     */
+    private fun checkLink(now: Long = System.currentTimeMillis()) {
+        if (!running || !pcMode) return
+        val up = PcLink.status.value.state == LinkState.STREAMING
+        if (!up && !linkDown) {
+            linkDown = true
+            Engine.linkLost(now)
+            if (periodic) {
+                // Don't sleep between checks while the PC is unreachable: keep looking continuously.
+                PcLink.streamEnabled = true
+                sleeping = false; checking = true; holding = true
+                Engine.setCheckState(true, false, 0L)
+            }
+        } else if (up && linkDown) {
+            linkDown = false
+            Engine.linkRestored()
+        }
+    }
+
     /** found = a human was confirmed. Otherwise the window ended empty ([unseenReason] = camera gave no picture). */
     private fun finishCheck(found: Boolean, now: Long, unseenReason: String? = null) {
         if (!periodic || !checking) return
         if (found) { enterSleep(now, 0L); return }
-        val s = Store.settingsFlow.value
-        // Person-missing alarm ON: don't sleep, keep watching until the person is back.
-        val keepAwake = unseenReason == null && s.alarmEnabled && Engine.personWasSeen()
         Engine.checkFoundNobody(now, unseenReason)
-        if (keepAwake) { holding = true; return }
-        val retry = if (unseenReason != null) minOf(s.periodicIntervalMs, UNSEEN_RETRY_MS) else 0L
-        enterSleep(now, retry)
+        // Nobody there: timer stays stopped, but keep the camera on and keep looking, so the countdown
+        // restarts the moment a human is back. (A phone camera that could not even open still retries later.)
+        if (pcMode || unseenReason == null) { holding = true; return }
+        enterSleep(now, minOf(Store.settingsFlow.value.periodicIntervalMs, UNSEEN_RETRY_MS))
     }
 
     /** Main thread, after every analyzed frame. */

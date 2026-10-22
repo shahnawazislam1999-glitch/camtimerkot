@@ -579,8 +579,8 @@ private class PcClient(private val ctx: Context) {
                             send(out, if (want) T_START else T_STOP, "{}".toByteArray())
                             startSent.set(want)
                         }
-                        if (++i % 4 == 0) send(out, T_PING, ByteArray(0))
-                        if (SystemClock.elapsedRealtime() - lastRx.get() > 4500) {
+                        if (++i % 2 == 0) send(out, T_PING, ByteArray(0))
+                        if (SystemClock.elapsedRealtime() - lastRx.get() > 3000) {
                             try { sock.close() } catch (_: Exception) { }
                         }
                     }

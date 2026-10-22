@@ -178,6 +178,34 @@ object Engine {
         }
         Store.notifyChanged()
     }
+
+    /**
+     * PC camera link dropped: stop the main countdown RIGHT NOW (no debounce). Detection stays armed,
+     * so the timer starts again by itself once the link is back and a human is seen.
+     */
+    fun linkLost(now: Long = System.currentTimeMillis()) {
+        synchronized(lock) {
+            if (!detecting) return
+            if (present) { endSession(now); saveTimerState(now) }
+            firstSeen = 0; lastSeen = 0
+            recentWeak.clear(); lastFrameHuman = false
+            publish { it.copy(
+                status = if (manualPaused) it.status else "🟠 PC camera disconnected — Timer stopped, searching…",
+                statusKind = if (manualPaused) it.statusKind else StatusKind.PAUSED,
+                detectionText = "PC camera disconnected", faces = emptyList(), body = null) }
+        }
+        Store.notifyChanged()
+    }
+
+    /** PC camera link is back: keep the timer stopped until a human is actually detected again. */
+    fun linkRestored() {
+        synchronized(lock) {
+            if (!detecting || manualPaused || present) return
+            publish { it.copy(status = "🟡 PC camera connected — looking for face or body...",
+                statusKind = StatusKind.IDLE, detectionText = "Camera active") }
+        }
+    }
+
     fun stopDetection(now: Long = System.currentTimeMillis()) {
         synchronized(lock) {
             if (!detecting && !present) return
