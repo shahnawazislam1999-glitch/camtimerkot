@@ -43,6 +43,20 @@ fun SettingsScreen(settings: AppSettings, live: LiveState, onBack: () -> Unit) {
             // Camera source + PC pairing
             PcSourceCard(settings, live.detecting)
 
+            // Global delayed alarm (2 minutes)
+            Card {
+                SectionTitle("Alarm delay")
+                ToggleRow(
+                    "⏱ Alarm after 2 minutes",
+                    "When ON, the alarm mp3 does NOT play immediately. It plays only if the PC camera stays disconnected " +
+                        "for 2 minutes, or no human is detected on the camera for 2 minutes. If the PC reconnects or a human " +
+                        "is seen before that, the 2-minute wait starts over. This replaces the immediate person-missing and " +
+                        "PC-disconnected alarms while it is ON. Pause / Stop silences it.",
+                    settings.delayedAlarmEnabled,
+                    extra = live.alarmPlayingText?.takeIf { settings.delayedAlarmEnabled }
+                ) { v -> Store.updateSettings { it.copy(delayedAlarmEnabled = v) } }
+            }
+
             // Alarm for a dropped PC camera connection (only meaningful with the PC camera)
             Card {
                 SectionTitle("Connection alarm")

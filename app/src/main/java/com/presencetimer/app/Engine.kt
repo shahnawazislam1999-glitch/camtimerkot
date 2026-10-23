@@ -130,12 +130,13 @@ object Engine {
             if (pause) {
                 if (present) { endSession(now); saveTimerState(now) }
                 firstSeen = 0; lastSeen = 0
-                publish { it.copy(paused = true, status = "⏸ Paused manually — timer frozen",
-                    statusKind = StatusKind.PAUSED) }
+                publish { it.copy(paused = true, status = "⏸ Paused — camera off, timer frozen",
+                    statusKind = StatusKind.PAUSED, detectionText = "Camera paused", faces = emptyList(), body = null) }
             } else {
                 firstSeen = 0; lastSeen = 0
+                recentWeak.clear(); lastFrameHuman = false; lastFrameAt = 0
                 publish { it.copy(paused = false, status = "🟡 Resumed — looking for face or body...",
-                    statusKind = StatusKind.IDLE) }
+                    statusKind = StatusKind.IDLE, detectionText = "Camera active") }
             }
         }
         Store.notifyChanged()
@@ -336,7 +337,7 @@ object Engine {
                 if (now - lastSaveAt >= 5000) { lastSaveAt = now; saveTimerState(now) }
                 if (now - lastNotifyAt >= 5000) { lastNotifyAt = now; Store.notifyChanged() }
             }
-            if (!periodic && lastFrameAt != 0L && now - lastFrameAt > 6000) {
+            if (!periodic && !manualPaused && lastFrameAt != 0L && now - lastFrameAt > 6000) {
                 publish { it.copy(detectionText = "No camera frames — camera may be used by another app") }
             }
             publish()

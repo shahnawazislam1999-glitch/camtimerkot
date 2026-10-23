@@ -27,13 +27,16 @@ data class AppSettings(
     val periodicEnabled: Boolean = false,       // look for a human only once every N seconds/minutes
     val periodicValue: Int = 10,                // N
     val periodicUnit: Int = AppSettings.UNIT_MINUTES,
-    val linkLostAlarmEnabled: Boolean = false   // buzz immediately when the PC camera connection drops
+    val linkLostAlarmEnabled: Boolean = false,  // buzz immediately when the PC camera connection drops
+    val delayedAlarmEnabled: Boolean = false    // global: alarm only after DELAYED_ALARM_MS of no human / no PC link
 ) {
     /** Time between two camera checks in periodic mode. */
     val periodicIntervalMs: Long
         get() = periodicValue.toLong() * (if (periodicUnit == UNIT_SECONDS) 1000L else 60_000L)
 
     companion object {
+        /** Delayed alarm: how long the problem must last before the mp3 plays. */
+        const val DELAYED_ALARM_MS = 2 * 60 * 1000L
         const val SOURCE_PHONE = 0
         const val SOURCE_PC = 1
         const val UNIT_SECONDS = 0
@@ -127,6 +130,7 @@ object Store {
                 cameraSource = rawSettings.optInt("cameraSource", 0).coerceIn(0, 1),
                 periodicEnabled = rawSettings.optBoolean("periodicEnabled", false),
                 linkLostAlarmEnabled = rawSettings.optBoolean("linkLostAlarmEnabled", false),
+                delayedAlarmEnabled = rawSettings.optBoolean("delayedAlarmEnabled", false),
                 periodicUnit = rawSettings.optInt("periodicUnit", AppSettings.UNIT_MINUTES)
                     .coerceIn(AppSettings.UNIT_SECONDS, AppSettings.UNIT_MINUTES)
             ).let { it.copy(periodicValue = AppSettings.clampValue(rawSettings.optInt("periodicValue", 10), it.periodicUnit)) }
@@ -152,6 +156,7 @@ object Store {
             rawSettings.put("periodicValue", s.periodicValue)
             rawSettings.put("periodicUnit", s.periodicUnit)
             rawSettings.put("linkLostAlarmEnabled", s.linkLostAlarmEnabled)
+            rawSettings.put("delayedAlarmEnabled", s.delayedAlarmEnabled)
             prefs.edit().putString(KEY_SETTINGS, rawSettings.toString()).apply()
             settingsFlow.update { s }
         }

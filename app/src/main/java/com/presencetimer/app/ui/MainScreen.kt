@@ -750,6 +750,7 @@ private fun CameraSettingsSummary(settings: AppSettings, onOpen: () -> Unit) {
         add(if (pc) "PC camera" else "Phone camera")
         add(if (settings.periodicEnabled) "checks every ${settings.periodicValue}$unit" else "continuous")
         if (settings.hideCamera) add("preview hidden")
+        if (settings.delayedAlarmEnabled) add("2 min alarm on")
         if (pc && settings.linkLostAlarmEnabled) add("disconnect alarm on")
     }
     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Panel)

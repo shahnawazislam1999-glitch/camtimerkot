@@ -107,6 +107,11 @@ class PresenceService : LifecycleService() {
     private var linkArmed = false
     private var startedAt = 0L
     private var linkDown = false                // PC link currently down: timer stopped, searching
+    private var cameraOffByPause = false        // manual pause turned the camera / stream off
+
+    // Delayed (2 min) alarm: when the current problem started, 0 = no problem right now.
+    private var noHumanSince = 0L
+    private var linkDownSince = 0L
 
     // ---- periodic ("check every N") mode state, all touched on the main thread except the two flags ----
     @Volatile private var periodic = false
@@ -149,10 +154,7 @@ class PresenceService : LifecycleService() {
         overlay = OverlayController(
             this,
             // Double tap toggles: running -> pause, paused -> start immediately
-            onDoubleTap = {
-                if (Engine.isPaused()) startNow()
-                else { Engine.setPaused(true); refreshOutputs(); evaluateAlarm() }
-            }
+            onDoubleTap = { if (Engine.isPaused()) startNow() else pauseNow() }
         )
         alarm = AlarmPlayer(this)
         createChannel()
@@ -174,7 +176,7 @@ class PresenceService : LifecycleService() {
             ACTION_STOP -> shutdown()
             ACTION_TOGGLE_PAUSE -> {
                 if (running) {
-                    if (Engine.isPaused()) startNow() else { Engine.setPaused(true); refreshOutputs(); evaluateAlarm() }
+                    if (Engine.isPaused()) startNow() else pauseNow()
                 }
             }
             else -> startDetection()
@@ -190,7 +192,14 @@ class PresenceService : LifecycleService() {
      */
     private fun startNow() {
         if (!running) return
-        if (Engine.isPaused()) Engine.setPaused(false)
+        val wasPaused = Engine.isPaused()
+        if (wasPaused) Engine.setPaused(false)
+        // Pause switched the camera / PC stream off: turn it back on now (unless periodic sleep handles it below).
+        if (wasPaused && cameraOffByPause) {
+            cameraOffByPause = false
+            if (!(periodic && sleeping)) wakeSource()
+        }
+        noHumanSince = 0L
         if (periodic && !Engine.isPresent()) {
             val now = System.currentTimeMillis()
             if (sleeping) beginCheck(now)
@@ -202,6 +211,18 @@ class PresenceService : LifecycleService() {
         }
         refreshOutputs(); evaluateAlarm()
     }
+
+    /** Manual pause: freeze the timer AND stop looking at the camera until the user resumes. */
+    private fun pauseNow() {
+        if (!running) return
+        Engine.setPaused(true)
+        if (!(periodic && sleeping)) sleepSource()      // already off while periodic-sleeping
+        cameraOffByPause = true
+        analyzerIdle()
+        refreshOutputs(); evaluateAlarm()
+    }
+
+    private fun analyzerIdle() { frameBusy.set(false) }
 
     /** User swiped the app out of Recents: keep tracking, timer, notification and overlay running. */
     override fun onTaskRemoved(rootIntent: Intent?) {
@@ -247,6 +268,8 @@ class PresenceService : LifecycleService() {
         startedAt = System.currentTimeMillis()
         periodic = Store.settingsFlow.value.periodicEnabled
         sleeping = false; holding = false
+        cameraOffByPause = false
+        noHumanSince = 0L; linkDownSince = 0L
         checking = periodic
         checkStart = System.currentTimeMillis(); checkFirstFrame = 0L
         Engine.startDetection(periodic)
@@ -299,7 +322,7 @@ class PresenceService : LifecycleService() {
 
     /** Runs on the link's reader thread: decode + detect the newest frame, drop frames while busy. */
     private fun onPcFrame(bytes: ByteArray) {
-        if (!running || (periodic && sleeping) || !frameBusy.compareAndSet(false, true)) return
+        if (!running || cameraOffByPause || (periodic && sleeping) || !frameBusy.compareAndSet(false, true)) return
         try {
             analysisExecutor.execute {
                 try {
@@ -322,6 +345,7 @@ class PresenceService : LifecycleService() {
     private fun shutdown() {
         running = false
         periodic = false; sleeping = false; checking = false; holding = false
+        cameraOffByPause = false
         tickJob?.cancel()
         Engine.stopDetection()
         setAlarm(null)
@@ -441,11 +465,12 @@ class PresenceService : LifecycleService() {
             checking = false; sleeping = false; holding = false
             Engine.setPeriodic(false, now)
             Engine.setCheckState(false, false, 0L)
-            if (wasSleeping) wakeSource()
+            if (wasSleeping && !cameraOffByPause) wakeSource()
         }
     }
 
     private fun wakeSource() {
+        if (cameraOffByPause) return
         if (pcMode) PcLink.streamEnabled = true else bindCamera()
     }
 
@@ -484,7 +509,7 @@ class PresenceService : LifecycleService() {
         if (!up && !linkDown) {
             linkDown = true
             Engine.linkLost(now)
-            if (periodic) {
+            if (periodic && !cameraOffByPause) {
                 // Don't sleep between checks while the PC is unreachable: keep looking continuously.
                 PcLink.streamEnabled = true
                 sleeping = false; checking = true; holding = true
@@ -520,7 +545,7 @@ class PresenceService : LifecycleService() {
 
     /** Once per second. */
     private fun periodicTick(now: Long) {
-        if (!periodic) return
+        if (!periodic || cameraOffByPause) return
         if (checking) {
             if (holding) return
             val noPicture = checkFirstFrame == 0L && now - checkStart >= NO_FRAME_TIMEOUT_MS
@@ -538,9 +563,12 @@ class PresenceService : LifecycleService() {
 
     private fun evaluateAlarm() {
         if (!running) { setAlarm(null); return }
-        if (Engine.isPaused()) { setAlarm(null); return }      // manually paused: stay silent
+        if (Engine.isPaused()) { noHumanSince = 0L; linkDownSince = 0L; setAlarm(null); return }  // manually paused: stay silent
         val s = Store.settingsFlow.value
         val now = System.currentTimeMillis()
+
+        if (s.delayedAlarmEnabled) { evaluateDelayedAlarm(s, now); return }
+        noHumanSince = 0L; linkDownSince = 0L
 
         // PC camera connection lost -> buzz immediately (if the toggle is on). The link stays up while the
         // camera sleeps in periodic mode, so a dropped link is detected there too.
@@ -562,6 +590,30 @@ class PresenceService : LifecycleService() {
             else -> null
         }
         setAlarm(desired)
+    }
+
+    /**
+     * Delayed mode: the mp3 only plays after DELAYED_ALARM_MS of (a) PC link down, or (b) no human on camera.
+     * Any recovery (link back / human seen) restarts the wait. Human-detected alarm still works as usual.
+     */
+    private fun evaluateDelayedAlarm(s: AppSettings, now: Long) {
+        val delay = AppSettings.DELAYED_ALARM_MS
+
+        // (a) PC link
+        val connected = !pcMode || PcLink.status.value.state == LinkState.STREAMING
+        if (connected) linkDownSince = 0L
+        else if (linkDownSince == 0L) linkDownSince = now
+        if (linkDownSince != 0L && now - linkDownSince >= delay) { setAlarm(AlarmReason.LINK_LOST); return }
+
+        // (b) no human on camera (camera asleep between periodic checks = a human was just found, so no problem)
+        val cameraLooking = connected && !(periodic && sleeping) && (!pcMode || PcLink.framesFlowing(now))
+        val humanOk = Engine.humanNow(now) || Engine.inGrace()
+        if (!cameraLooking || humanOk) noHumanSince = 0L
+        else if (noHumanSince == 0L) noHumanSince = now
+        if (noHumanSince != 0L && now - noHumanSince >= delay) { setAlarm(AlarmReason.MISSING); return }
+
+        // Not yet 2 minutes: stay silent, except the optional human-detected alarm.
+        if (Engine.humanNow(now) && s.humanAlarmEnabled) setAlarm(AlarmReason.DETECTED) else setAlarm(null)
     }
 
     private fun setAlarm(reason: AlarmReason?) {
