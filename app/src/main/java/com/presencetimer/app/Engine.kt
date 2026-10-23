@@ -15,7 +15,8 @@ data class FrameResult(
     val faces: List<FaceHit>,
     val bodyDetected: Boolean,
     val bodyConfidence: Float,
-    val bodyBox: NBox?
+    val bodyBox: NBox?,
+    val blinked: Boolean = false     // an eye blink was completed in this frame
 )
 
 data class LiveState(
@@ -52,6 +53,10 @@ object Engine {
     const val STOP_DEBOUNCE_MS = 1500L
     private const val RECENT_WINDOW = 5
     private const val RECENT_REQUIRED = 2
+    /** Blink mode: a blink keeps the person "confirmed" for this long (people blink every few seconds). */
+    const val BLINK_VALID_MS = 30_000L
+    /** Blink mode: face gone this long -> the next blink has to be seen again. */
+    private const val BLINK_FACE_LOST_MS = 2_000L
 
     private val lock = Any()
     private val _live = MutableStateFlow(LiveState())
@@ -73,6 +78,8 @@ object Engine {
     private var lastNotifyAt = 0L
     private var periodic = false
     private var manualPaused = false
+    private var lastBlinkAt = 0L
+    private var lastFaceAt = 0L
     private val recentWeak = ArrayDeque<Int>()
 
     fun init() {
@@ -84,6 +91,7 @@ object Engine {
             savedThrough = t.savedThroughMs
             publish()
         }
+        checkAutoReset(System.currentTimeMillis())
     }
 
     private fun publish(block: (LiveState) -> LiveState = { it }) {
@@ -108,6 +116,7 @@ object Engine {
             detecting = true; present = false
             firstSeen = 0; lastSeen = 0; sessionStart = 0; dailyCursor = 0
             recentWeak.clear(); personWasSeen = false
+            lastBlinkAt = 0; lastFaceAt = 0
             lastFrameAt = 0; lastFrameHuman = false
             publish { it.copy(status = "🟡 Looking for face or body...", statusKind = StatusKind.IDLE,
                 detectionText = "Camera active", error = null, faces = emptyList(), body = null,
@@ -260,6 +269,7 @@ object Engine {
         synchronized(lock) {
             if (!detecting) return false
 
+            val blinkMode = Store.settingsFlow.value.blinkOnly
             val strongFace = r.faces.any { it.strong }
             val hasFace = r.faces.isNotEmpty()
             val corroborated = hasFace && r.bodyDetected
@@ -269,8 +279,22 @@ object Engine {
             while (recentWeak.size > RECENT_WINDOW) recentWeak.removeFirst()
             val weakConfirmed = weak && recentWeak.sum() >= RECENT_REQUIRED
 
-            val faceDetected = strongFace || corroborated || weakConfirmed
-            val human = faceDetected || r.bodyDetected
+            // Blink verification: only a real face that blinked in the last BLINK_VALID_MS counts.
+            var blinkWaiting = false
+            val faceDetected: Boolean
+            val human: Boolean
+            if (blinkMode) {
+                if (strongFace) lastFaceAt = now
+                else if (now - lastFaceAt > BLINK_FACE_LOST_MS) lastBlinkAt = 0
+                if (r.blinked && strongFace) lastBlinkAt = now
+                val blinkValid = lastBlinkAt != 0L && now - lastBlinkAt <= BLINK_VALID_MS
+                faceDetected = strongFace && blinkValid
+                human = faceDetected
+                blinkWaiting = strongFace && !blinkValid
+            } else {
+                faceDetected = strongFace || corroborated || weakConfirmed
+                human = faceDetected || r.bodyDetected
+            }
             lastFrameAt = now
             lastFrameHuman = human
 
@@ -284,6 +308,7 @@ object Engine {
                     if (r.bodyDetected) "Body" else null
                 ).joinToString(" + ")
                 text = "Detected: $types" +
+                    (if (blinkMode) " • Blink OK" else "") +
                     if (r.bodyDetected) " • Body ${(r.bodyConfidence * 100).toInt()}%" else ""
                 personWasSeen = true
                 if (firstSeen == 0L) firstSeen = now
@@ -293,7 +318,7 @@ object Engine {
                     status = "🟢 Human detected — Timer running"; kind = StatusKind.RUNNING
                 }
             } else {
-                text = "Detected: None"
+                text = if (blinkWaiting) "Face seen — blink to confirm" else "Detected: None"
                 if (!present && firstSeen != 0L && now - lastSeen >= STOP_DEBOUNCE_MS) firstSeen = 0
                 // Periodic mode: the service decides at the end of the check window instead.
                 if (!periodic && present && now - lastSeen >= STOP_DEBOUNCE_MS) {
@@ -323,6 +348,7 @@ object Engine {
 
     /** Called ~once per second by the service: credits time, persists, and detects lost frames. */
     fun tick(now: Long) {
+        checkAutoReset(now)
         synchronized(lock) {
             if (!detecting) return
             if (!periodic && present && now - lastSeen >= STOP_DEBOUNCE_MS) {
@@ -358,6 +384,8 @@ object Engine {
             lastSeen = if (present) now else 0
             Store.clearTimer()
             saveTimerState(now)
+            // Manual and automatic resets both start a fresh 24 h cycle.
+            if (Store.settingsFlow.value.autoReset24h) Store.updateSettings { it.copy(autoResetAnchorMs = now) }
             publish { it.copy(
                 status = if (present) "🟢 Human detected — New timer session" else "⚪ Timer reset",
                 statusKind = if (present) StatusKind.RUNNING else StatusKind.IDLE) }
@@ -366,19 +394,42 @@ object Engine {
     }
 
     /** Saves a record of time not yet saved. Returns a short message for the user. */
-    fun saveSnapshot(now: Long = System.currentTimeMillis()): String = synchronized(lock) {
+    fun saveSnapshot(now: Long = System.currentTimeMillis(), label: String = "Saved timer"): String = synchronized(lock) {
         val total = accumulated + if (present && detecting) maxOf(0L, now - sessionStart) else 0L
         val duration = total - savedThrough
         if (duration <= 0) return@synchronized "No new time to save"
         Store.addRecord(Record(
             id = "$now-${java.lang.Long.toString((Math.random() * 1e12).toLong(), 36)}",
             timestamp = now, durationMs = duration,
-            dateKey = Fmt.dateKey(now), monthKey = Fmt.monthKey(now), label = "Saved timer"
+            dateKey = Fmt.dateKey(now), monthKey = Fmt.monthKey(now), label = label
         ))
         savedThrough = total
         saveTimerState(now)
         publish()
         "New timer time saved locally"
+    }
+
+    /**
+     * 24 h auto reset: when the toggle is ON and 24 hours passed since the last reset (or since the toggle
+     * was switched on), the unsaved time is kept as a saved record and the main countdown goes back to 0.
+     * Daily history is never touched. Called every second by the service and when the app opens, so a
+     * reset that came due while nothing was running happens on the next start.
+     */
+    fun checkAutoReset(now: Long) {
+        val s = Store.settingsFlow.value
+        if (!s.autoReset24h) return
+        if (s.autoResetAnchorMs <= 0L) {
+            Store.updateSettings { it.copy(autoResetAnchorMs = now) }
+            return
+        }
+        if (now - s.autoResetAnchorMs < AppSettings.AUTO_RESET_MS) return
+        synchronized(lock) {
+            val again = Store.settingsFlow.value
+            if (!again.autoReset24h || again.autoResetAnchorMs <= 0L ||
+                now - again.autoResetAnchorMs < AppSettings.AUTO_RESET_MS) return
+            saveSnapshot(now, "Auto-saved (24 h reset)")
+            resetTimer(now)     // also moves the anchor to now
+        }
     }
 
     fun resetAll() {
@@ -387,6 +438,7 @@ object Engine {
             firstSeen = 0; lastSeen = 0; dailyCursor = 0; personWasSeen = false
             recentWeak.clear()
             Store.clearAll()
+            if (Store.settingsFlow.value.autoReset24h) Store.updateSettings { it.copy(autoResetAnchorMs = System.currentTimeMillis()) }
             publish { it.copy(status = "⚪ All study data reset", statusKind = StatusKind.IDLE) }
         }
     }

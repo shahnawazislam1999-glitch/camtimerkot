@@ -29,11 +29,14 @@ class PresenceAnalyzer(
 
     @Volatile var mirror = true
     private var lastProcessed = 0L
+    private val blink = BlinkTracker()
 
     private val faceDetector = FaceDetection.getClient(
         FaceDetectorOptions.Builder()
             .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
             .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
+            // Eye-open probabilities, used by the "blink verification" toggle.
+            .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
             .setMinFaceSize(0.08f)
             .build()
     )
@@ -43,6 +46,8 @@ class PresenceAnalyzer(
 
     companion object {
         const val DETECTION_INTERVAL_MS = 200L
+        /** Blinks last ~100-300 ms, so blink verification needs a faster frame rate (~12 fps). */
+        const val BLINK_INTERVAL_MS = 80L
         const val BODY_LANDMARK_MIN = 0.6f        // per-landmark in-frame likelihood
         const val BODY_MIN_LANDMARKS = 8          // landmarks needed to call it a body
         const val SHOULDER_MIN = 0.5f
@@ -51,7 +56,8 @@ class PresenceAnalyzer(
     @OptIn(ExperimentalGetImage::class)
     override fun analyze(proxy: ImageProxy) {
         val now = SystemClock.elapsedRealtime()
-        if (now - lastProcessed < DETECTION_INTERVAL_MS) { proxy.close(); return }
+        val interval = if (Store.settingsFlow.value.blinkOnly) BLINK_INTERVAL_MS else DETECTION_INTERVAL_MS
+        if (now - lastProcessed < interval) { proxy.close(); return }
         lastProcessed = now
 
         val media = proxy.image
@@ -83,13 +89,26 @@ class PresenceAnalyzer(
 
     /** Shared by the phone camera and the PC camera: face + body detection on one image. */
     private fun detect(image: InputImage, w: Int, h: Int, flip: Boolean): FrameResult {
+        val blinkMode = Store.settingsFlow.value.blinkOnly
         val faces = Tasks.await(faceDetector.process(image))
-        val hits = faces.mapNotNull { toHit(it, w, h, flip) }
+        val pairs = faces.mapNotNull { f -> toHit(f, w, h, flip)?.let { f to it } }
+        val hits = pairs.map { it.second }
+
+        // Blink tracking follows the biggest face that passes the geometry checks.
+        var blinked = false
+        val main = pairs.filter { it.second.strong }.maxByOrNull { it.first.boundingBox.width() * it.first.boundingBox.height() }
+        if (main != null) {
+            blinked = blink.update(main.first.leftEyeOpenProbability, main.first.rightEyeOpenProbability,
+                SystemClock.elapsedRealtime())
+        } else {
+            blink.reset()
+        }
 
         var bodyDetected = false
         var bodyConf = 0f
         var bodyBox: NBox? = null
-        try {
+        // Blink mode only trusts a blinking face, so the (expensive) body model is skipped.
+        if (!blinkMode) try {
             val pose = Tasks.await(poseDetector.process(image))
             val good = pose.allPoseLandmarks.filter { it.inFrameLikelihood >= BODY_LANDMARK_MIN }
             val shoulders = listOfNotNull(
@@ -112,7 +131,7 @@ class PresenceAnalyzer(
             // Pose model unavailable: face detection alone still works.
         }
 
-        return FrameResult(hits, bodyDetected, bodyConf, bodyBox)
+        return FrameResult(hits, bodyDetected, bodyConf, bodyBox, blinked)
     }
 
     private fun norm(l: Float, t: Float, r: Float, b: Float, w: Int, h: Int, flip: Boolean, label: String): NBox {
@@ -158,5 +177,42 @@ class PresenceAnalyzer(
     fun close() {
         try { faceDetector.close() } catch (_: Exception) { }
         try { poseDetector.close() } catch (_: Exception) { }
+    }
+}
+
+/**
+ * Detects one eye blink from the per-frame "eye open" probabilities of ML Kit:
+ * both eyes open -> both eyes closed (at most [MAX_CLOSED_MS]) -> both eyes open again = one blink.
+ * Using hysteresis (two thresholds) and requiring BOTH eyes avoids counting winks and noisy frames.
+ * A long eye closure (sleeping, squinting) is not a blink.
+ */
+class BlinkTracker {
+    private companion object {
+        const val OPEN_T = 0.6f
+        const val CLOSED_T = 0.4f
+        const val MAX_CLOSED_MS = 1200L
+        const val MAX_GAP_MS = 600L      // longer gap between frames (camera slept / face lost) -> start over
+    }
+
+    private var state = 0                // 0 = unknown, 1 = eyes open, 2 = eyes closed
+    private var closedAt = 0L
+    private var lastAt = 0L
+
+    fun reset() { state = 0; closedAt = 0L }
+
+    /** [now] is a monotonic clock in ms. Returns true on the frame where a blink completes. */
+    fun update(left: Float?, right: Float?, now: Long): Boolean {
+        if (lastAt != 0L && now - lastAt > MAX_GAP_MS) reset()
+        lastAt = now
+        if (left == null || right == null) { reset(); return false }
+        val open = minOf(left, right) >= OPEN_T
+        val closed = maxOf(left, right) <= CLOSED_T
+        if (open) {
+            val blinked = state == 2 && now - closedAt <= MAX_CLOSED_MS
+            state = 1
+            return blinked
+        }
+        if (closed && state == 1) { state = 2; closedAt = now }
+        return false
     }
 }

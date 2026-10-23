@@ -85,10 +85,11 @@ class Actions(
     val onResetAll: () -> Unit, val onExport: () -> Unit, val onImport: () -> Unit,
     val onConfirmImport: () -> Unit, val onCancelImport: () -> Unit,
     val onCameraPerm: () -> Unit, val onNotifPerm: () -> Unit,
-    val onOverlayPerm: () -> Unit, val onBatteryPerm: () -> Unit, val onContact: () -> Unit
+    val onOverlayPerm: () -> Unit, val onBatteryPerm: () -> Unit, val onContact: () -> Unit,
+    val onAutostart: () -> Unit
 )
 
-private val ticker = flow { while (true) { emit(System.currentTimeMillis()); delay(250) } }
+internal val ticker = flow { while (true) { emit(System.currentTimeMillis()); delay(250) } }
 private val tnum = TextStyle(fontFeatureSettings = "tnum")
 
 @Composable
@@ -425,6 +426,14 @@ private fun PermissionsCard(p: PermState, a: Actions, pcMode: Boolean) {
         if (Build.VERSION.SDK_INT >= 33) PermRow("Notifications", "Timer in the notification panel", p.notifications, a.onNotifPerm)
         PermRow("Display over other apps", "Tiny dim timer on top of apps", p.overlay, a.onOverlayPerm)
         PermRow("Unrestricted battery", "Keeps tracking alive in background", p.battery, a.onBatteryPerm)
+        Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Autostart / background", fontSize = 14.sp)
+                Text("Phone-maker setting (Xiaomi, Oppo, Vivo, Samsung…). Allow autostart and lock the app in Recents so clearing Recents never stops it.",
+                    color = Muted, fontSize = 11.5.sp)
+            }
+            Btn("Open", modifier = Modifier.widthIn(min = 76.dp), onClick = a.onAutostart)
+        }
     }
 }
 
@@ -691,7 +700,15 @@ internal fun PeriodicCard(settings: AppSettings, live: LiveState) {
     }
 
     Card {
-        SectionTitle("Periodic detection (saves battery)")
+        SectionTitle("Camera power saving")
+        ToggleRow(
+            "😴 Sleep camera when nobody is there",
+            "When no human is on camera for 5 minutes in a row, the camera switches off completely. It wakes " +
+                "up only at the interval below for a short check: person found = normal tracking continues, " +
+                "nobody = it sleeps again until the next interval.",
+            settings.idleSleepEnabled
+        ) { v -> Store.updateSettings { it.copy(idleSleepEnabled = v) } }
+
         ToggleRow(
             "Check for a human only every…",
             "The camera wakes up once per interval, looks for a person for a few seconds, then switches off " +
@@ -700,7 +717,9 @@ internal fun PeriodicCard(settings: AppSettings, live: LiveState) {
             settings.periodicEnabled
         ) { v -> Store.updateSettings { it.copy(periodicEnabled = v) } }
 
-        if (settings.periodicEnabled) {
+        if (settings.periodicEnabled || settings.idleSleepEnabled) {
+            Text("Wake-up / check interval", fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(top = 8.dp))
             Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(
@@ -722,7 +741,7 @@ internal fun PeriodicCard(settings: AppSettings, live: LiveState) {
                     applyInterval(AppSettings.UNIT_MINUTES)
                 }
             }
-            Text("Camera checks every ${settings.periodicValue} $unitName", fontSize = 13.sp,
+            Text("Camera wakes every ${settings.periodicValue} $unitName", fontSize = 13.sp,
                 fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 10.dp))
             if (live.detecting && live.periodic) {
                 val line = when {
@@ -732,8 +751,8 @@ internal fun PeriodicCard(settings: AppSettings, live: LiveState) {
                 }
                 if (line != null) Text(line, color = Green, fontSize = 12.5.sp, modifier = Modifier.padding(top = 3.dp))
             }
-            Text("Allowed: 10–3600 seconds or 1–1440 minutes. You can change it while detection is running. " +
-                "The person-missing alarm keeps the camera awake until the person is back; the human-detected " +
+            Text("Allowed: 5–3600 seconds or 1–1440 minutes. You can change it while detection is running. " +
+                "The person-missing alarm keeps the camera awake while it is sounding; the human-detected " +
                 "alarm only sounds while the camera is awake.",
                 color = Muted, fontSize = 11.5.sp, modifier = Modifier.padding(top = 6.dp))
         }
@@ -749,6 +768,9 @@ private fun CameraSettingsSummary(settings: AppSettings, onOpen: () -> Unit) {
     val parts = buildList {
         add(if (pc) "PC camera" else "Phone camera")
         add(if (settings.periodicEnabled) "checks every ${settings.periodicValue}$unit" else "continuous")
+        if (settings.idleSleepEnabled) add("sleeps after 5 min idle (wakes every ${settings.periodicValue}$unit)")
+        if (settings.blinkOnly) add("blink check on")
+        if (settings.autoReset24h) add("24 h auto reset")
         if (settings.hideCamera) add("preview hidden")
         if (settings.delayedAlarmEnabled) add("2 min alarm on")
         if (pc && settings.linkLostAlarmEnabled) add("disconnect alarm on")

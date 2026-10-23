@@ -15,12 +15,15 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.presencetimer.app.AppSettings
+import com.presencetimer.app.Fmt
 import com.presencetimer.app.LiveState
 import com.presencetimer.app.Store
 
@@ -29,6 +32,7 @@ import com.presencetimer.app.Store
 fun SettingsScreen(settings: AppSettings, live: LiveState, onBack: () -> Unit) {
     BackHandler(onBack = onBack)
     val pc = settings.cameraSource == AppSettings.SOURCE_PC
+    val now by ticker.collectAsStateWithLifecycle(initialValue = System.currentTimeMillis())
 
     Column(Modifier.fillMaxSize().background(Bg).verticalScroll(rememberScrollState())
         .padding(horizontal = 16.dp, vertical = 14.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -42,6 +46,37 @@ fun SettingsScreen(settings: AppSettings, live: LiveState, onBack: () -> Unit) {
 
             // Camera source + PC pairing
             PcSourceCard(settings, live.detecting)
+
+            // Blink verification
+            Card {
+                SectionTitle("Detection mode")
+                ToggleRow(
+                    "👁 Blink verification",
+                    "When ON, a person only counts after the camera sees them BLINK (both eyes close and open). " +
+                        "A face that never blinks (photo, screen, poster) is ignored, and the person is " +
+                        "confirmed for 30 seconds after each blink. Body detection is not used in this mode. " +
+                        "When OFF, normal face + body detection is used.",
+                    settings.blinkOnly,
+                    extra = if (settings.blinkOnly) "Look at the camera and blink once to start the timer" else null
+                ) { v -> Store.updateSettings { it.copy(blinkOnly = v) } }
+            }
+
+            // 24 h auto reset
+            Card {
+                SectionTitle("Auto reset")
+                val left = settings.autoResetAnchorMs + AppSettings.AUTO_RESET_MS - now
+                ToggleRow(
+                    "🔄 Reset main countdown every 24 hours",
+                    "When ON, the main countdown goes back to 00:00:00 automatically 24 hours after the last reset " +
+                        "(or after you switched this on). The time is saved as a record first, and your daily " +
+                        "study history is never touched.",
+                    settings.autoReset24h,
+                    extra = if (settings.autoReset24h && settings.autoResetAnchorMs > 0) "Next automatic reset in ${Fmt.time(left)}" else null
+                ) { v ->
+                    Store.updateSettings { it.copy(autoReset24h = v,
+                        autoResetAnchorMs = if (v) System.currentTimeMillis() else 0L) }
+                }
+            }
 
             // Global delayed alarm (2 minutes)
             Card {

@@ -14,6 +14,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.net.wifi.WifiManager
 import android.provider.Settings
 import androidx.camera.core.AspectRatio
 import androidx.camera.core.CameraSelector
@@ -54,6 +55,12 @@ class PresenceService : LifecycleService() {
 
         /** Periodic mode: how long the camera looks for a human during one check. */
         private const val CHECK_WINDOW_MS = 6_000L
+        /** Same, when blink verification is ON (a person has to be seen blinking, which can take a while). */
+        private const val BLINK_CHECK_WINDOW_MS = 15_000L
+        private const val IDLE_SLEEP_TEXT = "😴 No human for 5 min — camera asleep to save power"
+        /** Wake lock is re-armed every WAKELOCK_RENEW_MS so it can never time out while tracking. */
+        private const val WAKELOCK_TIMEOUT_MS = 30 * 60 * 1000L
+        private const val WAKELOCK_RENEW_MS = 10 * 60 * 1000L
         /** Periodic mode: give up on a check if the camera delivers no picture at all. */
         private const val NO_FRAME_TIMEOUT_MS = 15_000L
         /** Periodic mode: after a check that could not see anything, retry sooner than the interval. */
@@ -95,6 +102,8 @@ class PresenceService : LifecycleService() {
     private var cameraProvider: ProcessCameraProvider? = null
     private var preview: Preview? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private var wakeLockAt = 0L
+    private var wifiLock: WifiManager.WifiLock? = null
     private var tickJob: Job? = null
     private var alarmReason: AlarmReason? = null
     private var appVisible = true
@@ -120,6 +129,10 @@ class PresenceService : LifecycleService() {
     private var holding = false                 // nobody found but person-missing alarm is on: stay awake
     private var checkStart = 0L
     private var checkFirstFrame = 0L
+    private var holdStart = 0L                  // when "nobody found, camera stays on" began
+    private var idleSince = 0L                  // continuous mode: when the current no-human stretch began
+    private var idleCycle = false               // 5 min without a human passed: camera only wakes every interval
+    private var autoPeriodic = false            // periodic mode was switched on by idle sleep (not by the user)
     private var sleepFrom = 0L
     private var sleepLenOverride = 0L           // >0: wake after this instead of the normal interval
 
@@ -200,6 +213,7 @@ class PresenceService : LifecycleService() {
             if (!(periodic && sleeping)) wakeSource()
         }
         noHumanSince = 0L
+        idleSince = 0L; idleCycle = false
         if (periodic && !Engine.isPresent()) {
             val now = System.currentTimeMillis()
             if (sleeping) beginCheck(now)
@@ -229,6 +243,8 @@ class PresenceService : LifecycleService() {
         super.onTaskRemoved(rootIntent)
         if (running) {
             acquireWakeLock()
+            // Some phones drop the notification together with the task: put it back, stay a foreground service.
+            try { startForegroundCompat() } catch (_: Exception) { }
             refreshOutputs()
         }
     }
@@ -268,6 +284,7 @@ class PresenceService : LifecycleService() {
         startedAt = System.currentTimeMillis()
         periodic = Store.settingsFlow.value.periodicEnabled
         sleeping = false; holding = false
+        idleCycle = false; autoPeriodic = false; holdStart = 0L; idleSince = 0L
         cameraOffByPause = false
         noHumanSince = 0L; linkDownSince = 0L
         checking = periodic
@@ -282,6 +299,8 @@ class PresenceService : LifecycleService() {
                 val now = System.currentTimeMillis()
                 Engine.tick(now)
                 checkLink(now)
+                keepAwakeTick(now)
+                idleTick(now)
                 periodicTick(now)
                 refreshOutputs()
                 evaluateAlarm()
@@ -345,6 +364,7 @@ class PresenceService : LifecycleService() {
     private fun shutdown() {
         running = false
         periodic = false; sleeping = false; checking = false; holding = false
+        idleCycle = false; autoPeriodic = false; idleSince = 0L
         cameraOffByPause = false
         tickJob?.cancel()
         Engine.stopDetection()
@@ -425,16 +445,40 @@ class PresenceService : LifecycleService() {
     }
 
     private fun acquireWakeLock() {
-        if (wakeLock?.isHeld == true) return
-        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PresenceTimer::Detection").apply {
-            acquire(24 * 60 * 60 * 1000L)
-        }
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            val wl = wakeLock ?: pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PresenceTimer::Detection")
+                .apply { setReferenceCounted(false) }
+            wakeLock = wl
+            wl.acquire(WAKELOCK_TIMEOUT_MS)         // re-acquiring simply moves the timeout forward
+            wakeLockAt = System.currentTimeMillis()
+        } catch (_: Exception) { }
+        if (pcMode) acquireWifiLock()
+    }
+
+    /** PC camera mode: stop Wi-Fi from going to sleep, so the stream and the link watchdog keep working. */
+    private fun acquireWifiLock() {
+        try {
+            if (wifiLock?.isHeld == true) return
+            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            val mode = if (Build.VERSION.SDK_INT >= 29) WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                       else @Suppress("DEPRECATION") WifiManager.WIFI_MODE_FULL_HIGH_PERF
+            wifiLock = wm.createWifiLock(mode, "PresenceTimer::Wifi").apply {
+                setReferenceCounted(false); acquire()
+            }
+        } catch (_: Exception) { }
     }
 
     private fun releaseWakeLock() {
         try { if (wakeLock?.isHeld == true) wakeLock?.release() } catch (_: Exception) { }
         wakeLock = null
+        try { if (wifiLock?.isHeld == true) wifiLock?.release() } catch (_: Exception) { }
+        wifiLock = null
+    }
+
+    /** Once per second: the wake lock may never run out while the countdown is going. */
+    private fun keepAwakeTick(now: Long) {
+        if (wakeLock?.isHeld != true || now - wakeLockAt >= WAKELOCK_RENEW_MS) acquireWakeLock()
     }
 
     // ---------- periodic ("check every N seconds/minutes") mode ----------
@@ -450,19 +494,23 @@ class PresenceService : LifecycleService() {
     /** Settings changed while running: switch periodic mode on/off without stopping detection. */
     private fun syncPeriodicMode() {
         if (!running) return
-        val want = Store.settingsFlow.value.periodicEnabled
+        val s = Store.settingsFlow.value
+        if (s.periodicEnabled) autoPeriodic = false                      // the user's own periodic mode takes over
+        if (!s.idleSleepEnabled && autoPeriodic) { autoPeriodic = false; idleCycle = false }
+        val want = s.periodicEnabled || autoPeriodic
         if (want == periodic) return
         val now = System.currentTimeMillis()
         if (want) {
             periodic = true
             checking = true; sleeping = false; holding = false
-            checkStart = now; checkFirstFrame = 0L
+            checkStart = now; checkFirstFrame = 0L; idleSince = 0L
             Engine.setPeriodic(true, now)
             Engine.setCheckState(true, false, 0L)
         } else {
             val wasSleeping = sleeping
             periodic = false
             checking = false; sleeping = false; holding = false
+            idleCycle = false; idleSince = now
             Engine.setPeriodic(false, now)
             Engine.setCheckState(false, false, 0L)
             if (wasSleeping && !cameraOffByPause) wakeSource()
@@ -524,12 +572,57 @@ class PresenceService : LifecycleService() {
     /** found = a human was confirmed. Otherwise the window ended empty ([unseenReason] = camera gave no picture). */
     private fun finishCheck(found: Boolean, now: Long, unseenReason: String? = null) {
         if (!periodic || !checking) return
-        if (found) { enterSleep(now, 0L); return }
+        if (found) { onCheckFoundHuman(now); return }
         Engine.checkFoundNobody(now, unseenReason)
+        val s = Store.settingsFlow.value
+        val retry = if (!pcMode && unseenReason != null) minOf(s.periodicIntervalMs, UNSEEN_RETRY_MS) else 0L
+        if (idleCycle && s.idleSleepEnabled) {
+            // Already in the "nobody there" cycle: straight back to sleep until the next check.
+            enterSleep(now, retry)
+            return
+        }
         // Nobody there: timer stays stopped, but keep the camera on and keep looking, so the countdown
-        // restarts the moment a human is back. (A phone camera that could not even open still retries later.)
-        if (pcMode || unseenReason == null) { holding = true; return }
-        enterSleep(now, minOf(Store.settingsFlow.value.periodicIntervalMs, UNSEEN_RETRY_MS))
+        // restarts the moment a human is back. After NO_HUMAN_SLEEP_MS of that, periodicTick puts the
+        // camera to sleep. (A phone camera that could not even open still retries later.)
+        if (pcMode || unseenReason == null) { holding = true; holdStart = now; return }
+        enterSleep(now, retry)
+    }
+
+    /** A check (or the continuous watch) saw a human again. */
+    private fun onCheckFoundHuman(now: Long) {
+        idleCycle = false; idleSince = now; holding = false
+        if (autoPeriodic) {
+            autoPeriodic = false
+            if (!Store.settingsFlow.value.periodicEnabled) {
+                // Back to normal continuous tracking: the camera is already on.
+                periodic = false; checking = false; sleeping = false
+                Engine.setPeriodic(false, now)
+                Engine.setCheckState(false, false, 0L)
+                return
+            }
+        }
+        enterSleep(now, 0L)
+    }
+
+    /**
+     * Continuous mode (no periodic checks): no human on camera for NO_HUMAN_SLEEP_MS in a row -> the camera
+     * goes to sleep and from then on only wakes every <interval> for a short check. A human found at a check
+     * brings back continuous tracking. Never while paused, while the PC link is down, or while the
+     * person-missing alarm is sounding (that alarm needs the camera).
+     */
+    private fun idleTick(now: Long) {
+        if (periodic) { idleSince = 0L; return }
+        val s = Store.settingsFlow.value
+        if (!s.idleSleepEnabled || cameraOffByPause || Engine.isPaused() || linkDown) { idleSince = 0L; return }
+        if (Engine.humanNow(now) || Engine.inGrace()) { idleSince = 0L; return }
+        if (alarmReason == AlarmReason.MISSING) { idleSince = now; return }
+        if (idleSince == 0L) { idleSince = now; return }
+        if (now - idleSince < AppSettings.NO_HUMAN_SLEEP_MS) return
+        idleSince = 0L
+        autoPeriodic = true; idleCycle = true; periodic = true
+        Engine.setPeriodic(true, now)
+        Engine.checkFoundNobody(now, IDLE_SLEEP_TEXT)
+        enterSleep(now, 0L)
     }
 
     /** Main thread, after every analyzed frame. */
@@ -547,9 +640,24 @@ class PresenceService : LifecycleService() {
     private fun periodicTick(now: Long) {
         if (!periodic || cameraOffByPause) return
         if (checking) {
-            if (holding) return
+            if (holding) {
+                // Camera stays on, looking for a human. After NO_HUMAN_SLEEP_MS of nobody: sleep.
+                val s = Store.settingsFlow.value
+                if (holdStart == 0L) holdStart = now
+                if (!s.idleSleepEnabled || linkDown || Engine.isPaused() || alarmReason == AlarmReason.MISSING) {
+                    holdStart = now
+                    return
+                }
+                if (now - holdStart >= AppSettings.NO_HUMAN_SLEEP_MS) {
+                    holding = false; idleCycle = true
+                    Engine.checkFoundNobody(now, IDLE_SLEEP_TEXT)
+                    enterSleep(now, 0L)
+                }
+                return
+            }
+            val window = if (Store.settingsFlow.value.blinkOnly) BLINK_CHECK_WINDOW_MS else CHECK_WINDOW_MS
             val noPicture = checkFirstFrame == 0L && now - checkStart >= NO_FRAME_TIMEOUT_MS
-            val windowOver = checkFirstFrame != 0L && now - checkFirstFrame >= CHECK_WINDOW_MS
+            val windowOver = checkFirstFrame != 0L && now - checkFirstFrame >= window
             if (noPicture) finishCheck(false, now, "⚠️ No camera picture — timer paused, will retry")
             else if (windowOver) finishCheck(false, now)
         } else if (sleeping) {

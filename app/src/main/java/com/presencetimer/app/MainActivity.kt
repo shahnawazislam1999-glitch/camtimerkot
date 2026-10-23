@@ -27,6 +27,7 @@ class MainActivity : ComponentActivity() {
 
     private var resumeTick by mutableIntStateOf(0)
     private var pendingImport by mutableStateOf<Backup.Parsed?>(null)
+    private var askedBatteryThisLaunch = false
 
     private fun granted(p: String) =
         ContextCompat.checkSelfPermission(this, p) == PackageManager.PERMISSION_GRANTED
@@ -39,6 +40,7 @@ class MainActivity : ComponentActivity() {
             val pc = Store.settingsFlow.value.cameraSource == AppSettings.SOURCE_PC
             if (pc || granted(Manifest.permission.CAMERA)) {
                 PresenceService.start(this)
+                requestKeepAlive()
             } else {
                 Engine.reportError("Camera permission denied. Open Settings → Apps → Presence Timer → Permissions → Camera → Allow.")
             }
@@ -99,6 +101,7 @@ class MainActivity : ComponentActivity() {
                     startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
                 }
             },
+            onAutostart = ::openAutostartSettings,
             onContact = {
                 val msg = Uri.encode("Hello Developer, I need help with Presence Timer.")
                 startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://wa.me/918399964358?text=$msg")))
@@ -127,6 +130,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        Engine.checkAutoReset(System.currentTimeMillis())
         resumeTick++
     }
 
@@ -144,8 +148,49 @@ class MainActivity : ComponentActivity() {
         val needed = mutableListOf<String>()
         if (!pc && !granted(Manifest.permission.CAMERA)) needed.add(Manifest.permission.CAMERA)
         if (!notifOk()) needed.add(Manifest.permission.POST_NOTIFICATIONS)
-        if (needed.isEmpty()) PresenceService.start(this)
+        if (needed.isEmpty()) { PresenceService.start(this); requestKeepAlive() }
         else permLauncher.launch(needed.toTypedArray())
+    }
+
+    /**
+     * While the countdown runs the phone must not stop the app: ask (once per app launch, and only while
+     * not yet allowed) to exempt it from battery optimisation. Delayed a moment so the camera service has
+     * already started while the app is still on screen.
+     */
+    private fun requestKeepAlive() {
+        val pm = getSystemService(POWER_SERVICE) as PowerManager
+        if (askedBatteryThisLaunch || pm.isIgnoringBatteryOptimizations(packageName)) return
+        askedBatteryThisLaunch = true
+        window.decorView.postDelayed({
+            try {
+                startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+            } catch (_: Exception) { }
+        }, 1500)
+    }
+
+    /** Opens the phone maker's "autostart / app launch / protected apps" screen, or the app's own settings. */
+    private fun openAutostartSettings() {
+        val candidates = listOf(
+            "com.miui.securitycenter" to "com.miui.permcenter.autostart.AutoStartManagementActivity",
+            "com.coloros.safecenter" to "com.coloros.safecenter.permission.startup.StartupAppListActivity",
+            "com.oppo.safe" to "com.oppo.safe.permission.startup.StartupAppListActivity",
+            "com.vivo.permissionmanager" to "com.vivo.permissionmanager.activity.BgStartUpManagerActivity",
+            "com.iqoo.secure" to "com.iqoo.secure.ui.phoneoptimize.AddWhiteListActivity",
+            "com.huawei.systemmanager" to "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity",
+            "com.samsung.android.lool" to "com.samsung.android.sm.battery.ui.BatteryActivity",
+            "com.asus.mobilemanager" to "com.asus.mobilemanager.autostart.AutoStartActivity",
+            "com.letv.android.letvsafe" to "com.letv.android.letvsafe.AutobootManageActivity"
+        )
+        for ((pkg, cls) in candidates) {
+            try {
+                startActivity(Intent().setClassName(pkg, cls).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                return
+            } catch (_: Exception) { }
+        }
+        try {
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+            toast("Allow autostart / background activity and lock the app in Recents.")
+        } catch (_: Exception) { }
     }
 
     private fun writeBackup(uri: Uri) {

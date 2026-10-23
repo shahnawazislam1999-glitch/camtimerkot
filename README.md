@@ -13,6 +13,16 @@ saved records, alarms and backup/restore. Adds what a web page cannot do:
 
 Detection is fully offline: ML Kit face detection and pose detection (body) ship inside the APK.
 
+## New in 1.3.0
+- **Camera sleeps when nobody is there**: no human on camera for 5 minutes in a row -> camera switches off. It wakes only at
+  the interval you typed (Settings -> Camera power saving, 5 s .. 24 h) for a short check. Person found = normal tracking
+  again, nobody = sleeps again. (Not used while paused, while the PC link is down, or while the person-missing alarm sounds.)
+- **Blink verification** toggle (Settings -> Detection mode): a person only counts after a blink is seen (30 s validity per blink).
+  OFF = normal face + body detection.
+- **24 h auto reset** toggle (Settings -> Auto reset): main countdown returns to 0 every 24 h; the time is saved as a record first.
+- **Stay awake**: wake lock is renewed (it used to expire after 24 h), Wi-Fi lock in PC mode, battery-exemption prompt when you press Start,
+  "Autostart / background" button in the Permissions card, notification restored when the app is cleared from Recents.
+
 ## Build the APK on GitHub
 1. Create a GitHub repo and push this whole folder (the `.github` folder must be included).
 2. Open the **Actions** tab, then **Build Android APK** (it runs on every push; or press **Run workflow**).

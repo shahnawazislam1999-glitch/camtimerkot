@@ -28,7 +28,11 @@ data class AppSettings(
     val periodicValue: Int = 10,                // N
     val periodicUnit: Int = AppSettings.UNIT_MINUTES,
     val linkLostAlarmEnabled: Boolean = false,  // buzz immediately when the PC camera connection drops
-    val delayedAlarmEnabled: Boolean = false    // global: alarm only after DELAYED_ALARM_MS of no human / no PC link
+    val delayedAlarmEnabled: Boolean = false,   // global: alarm only after DELAYED_ALARM_MS of no human / no PC link
+    val idleSleepEnabled: Boolean = true,       // camera sleeps after NO_HUMAN_SLEEP_MS without a human, wakes every interval
+    val blinkOnly: Boolean = false,             // a person only counts after an eye blink was seen
+    val autoReset24h: Boolean = false,          // main countdown goes back to 0 every 24 hours
+    val autoResetAnchorMs: Long = 0L            // when the current 24 h cycle started
 ) {
     /** Time between two camera checks in periodic mode. */
     val periodicIntervalMs: Long
@@ -37,13 +41,17 @@ data class AppSettings(
     companion object {
         /** Delayed alarm: how long the problem must last before the mp3 plays. */
         const val DELAYED_ALARM_MS = 2 * 60 * 1000L
+        /** Continuous tracking with nobody in front of the camera for this long -> camera sleeps. */
+        const val NO_HUMAN_SLEEP_MS = 5 * 60 * 1000L
+        /** Auto reset cycle length. */
+        const val AUTO_RESET_MS = 24 * 60 * 60 * 1000L
         const val SOURCE_PHONE = 0
         const val SOURCE_PC = 1
         const val UNIT_SECONDS = 0
         const val UNIT_MINUTES = 1
 
-        /** Allowed range: 10 s .. 60 min in seconds mode, 1 .. 1440 min (24 h) in minutes mode. */
-        fun minValue(unit: Int) = if (unit == UNIT_SECONDS) 10 else 1
+        /** Allowed range: 5 s .. 60 min in seconds mode, 1 .. 1440 min (24 h) in minutes mode. */
+        fun minValue(unit: Int) = if (unit == UNIT_SECONDS) 5 else 1
         fun maxValue(unit: Int) = if (unit == UNIT_SECONDS) 3600 else 1440
         fun clampValue(value: Int, unit: Int) = value.coerceIn(minValue(unit), maxValue(unit))
     }
@@ -131,6 +139,10 @@ object Store {
                 periodicEnabled = rawSettings.optBoolean("periodicEnabled", false),
                 linkLostAlarmEnabled = rawSettings.optBoolean("linkLostAlarmEnabled", false),
                 delayedAlarmEnabled = rawSettings.optBoolean("delayedAlarmEnabled", false),
+                idleSleepEnabled = rawSettings.optBoolean("idleSleepEnabled", true),
+                blinkOnly = rawSettings.optBoolean("blinkOnly", false),
+                autoReset24h = rawSettings.optBoolean("autoReset24h", false),
+                autoResetAnchorMs = rawSettings.optLong("autoResetAnchorMs", 0L),
                 periodicUnit = rawSettings.optInt("periodicUnit", AppSettings.UNIT_MINUTES)
                     .coerceIn(AppSettings.UNIT_SECONDS, AppSettings.UNIT_MINUTES)
             ).let { it.copy(periodicValue = AppSettings.clampValue(rawSettings.optInt("periodicValue", 10), it.periodicUnit)) }
@@ -157,6 +169,10 @@ object Store {
             rawSettings.put("periodicUnit", s.periodicUnit)
             rawSettings.put("linkLostAlarmEnabled", s.linkLostAlarmEnabled)
             rawSettings.put("delayedAlarmEnabled", s.delayedAlarmEnabled)
+            rawSettings.put("idleSleepEnabled", s.idleSleepEnabled)
+            rawSettings.put("blinkOnly", s.blinkOnly)
+            rawSettings.put("autoReset24h", s.autoReset24h)
+            rawSettings.put("autoResetAnchorMs", s.autoResetAnchorMs)
             prefs.edit().putString(KEY_SETTINGS, rawSettings.toString()).apply()
             settingsFlow.update { s }
         }
