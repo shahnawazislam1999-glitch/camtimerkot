@@ -139,8 +139,7 @@ class PresenceService : LifecycleService() {
     private var sleepLenOverride = 0L           // >0: wake after this instead of the normal interval
 
     // ---- aggressive mode ----
-    private var aggRecheck = false              // the current check is the second chance (after 2 min camera off)
-    private var aggAlarmArmed = false           // both 30 s checks failed: person-missing alarm is ringing / armed
+    private var aggAlarmArmed = false           // the 5 min check failed: alarm rings until the user acts / a human is confirmed
 
     private val camStateObserver = Observer<CameraState> { state ->
         val err = state.error
@@ -222,7 +221,7 @@ class PresenceService : LifecycleService() {
         }
         noHumanSince = 0L
         idleSince = 0L; idleCycle = false
-        aggRecheck = false; aggAlarmArmed = false
+        aggAlarmArmed = false
         if (periodic && !Engine.isPresent()) {
             val now = System.currentTimeMillis()
             if (sleeping) beginCheck(now)
@@ -230,7 +229,7 @@ class PresenceService : LifecycleService() {
                 holding = false; checking = true
                 checkStart = now; checkFirstFrame = 0L
                 Engine.setCheckState(true, false, 0L)
-                if (aggOn()) verifier.begin()
+                if (aggOn()) verifier.begin(true)
             }
         }
         refreshOutputs(); evaluateAlarm()
@@ -240,7 +239,7 @@ class PresenceService : LifecycleService() {
     private fun pauseNow() {
         if (!running) return
         Engine.setPaused(true)
-        verifier.end(); aggRecheck = false; aggAlarmArmed = false
+        verifier.end(); aggAlarmArmed = false
         if (!(periodic && sleeping)) sleepSource()      // already off while periodic-sleeping
         cameraOffByPause = true
         analyzerIdle()
@@ -294,7 +293,7 @@ class PresenceService : LifecycleService() {
         linkDown = false
         startedAt = System.currentTimeMillis()
         periodic = Store.settingsFlow.value.periodicEnabled || Store.settingsFlow.value.aggressiveMode
-        aggRecheck = false; aggAlarmArmed = false
+        aggAlarmArmed = false
         sleeping = false; holding = false
         idleCycle = false; autoPeriodic = false; holdStart = 0L; idleSince = 0L
         cameraOffByPause = false
@@ -302,7 +301,7 @@ class PresenceService : LifecycleService() {
         checking = periodic
         checkStart = System.currentTimeMillis(); checkFirstFrame = 0L
         Engine.startDetection(periodic)
-        if (aggOn()) { verifier.begin(); Engine.setStatusText("🔍 Verifying human (head, eyes, nose, movement)…") }
+        if (aggOn()) { verifier.begin(true); Engine.setStatusText("🔍 Checking for a human (up to 5 min)…") }
         acquireWakeLock()
         if (pcMode) startPcSource() else bindCamera()
 
@@ -379,7 +378,7 @@ class PresenceService : LifecycleService() {
         periodic = false; sleeping = false; checking = false; holding = false
         idleCycle = false; autoPeriodic = false; idleSince = 0L
         cameraOffByPause = false
-        aggRecheck = false; aggAlarmArmed = false
+        aggAlarmArmed = false
         verifier.end()
         tickJob?.cancel()
         Engine.stopDetection()
@@ -446,7 +445,10 @@ class PresenceService : LifecycleService() {
             } catch (e: Exception) {
                 val msg = "Camera error: ${e.message ?: e.javaClass.simpleName}"
                 Engine.reportError(msg)
-                if (periodic && e !is IllegalStateException) {
+                if (aggOn() && e !is IllegalStateException) {
+                    // Camera busy: aggressive window keeps running; it fails (alarm) only if the 5 min pass unseen.
+                    Engine.setStatusText("⚠️ Camera unavailable — still trying until the 5 min check ends")
+                } else if (periodic && e !is IllegalStateException) {
                     // A temporary problem (e.g. camera busy): count this check as "could not see", try again later.
                     finishCheck(false, System.currentTimeMillis(), "⚠️ Camera unavailable — timer paused, will retry")
                 } else {
@@ -514,12 +516,12 @@ class PresenceService : LifecycleService() {
         if (s.periodicEnabled) autoPeriodic = false                      // the user's own periodic mode takes over
         if (!s.idleSleepEnabled && autoPeriodic) { autoPeriodic = false; idleCycle = false }
         val want = s.periodicEnabled || autoPeriodic || s.aggressiveMode
-        if (!s.aggressiveMode && (aggRecheck || aggAlarmArmed || verifier.isActive())) {
+        if (!s.aggressiveMode && (aggAlarmArmed || verifier.isActive())) {
             // Aggressive mode switched off while running: forget its state, delete temporary photos.
-            aggRecheck = false; aggAlarmArmed = false; verifier.end()
+            aggAlarmArmed = false; verifier.end()
         }
         if (want == periodic) {
-            if (want && s.aggressiveMode && checking && !verifier.isActive() && !sleeping) verifier.begin(holding)
+            if (want && s.aggressiveMode && checking && !verifier.isActive() && !sleeping) verifier.begin(true)
             return
         }
         val now = System.currentTimeMillis()
@@ -527,7 +529,7 @@ class PresenceService : LifecycleService() {
             periodic = true
             checking = true; sleeping = false; holding = false
             checkStart = now; checkFirstFrame = 0L; idleSince = 0L
-            if (s.aggressiveMode) verifier.begin()
+            if (s.aggressiveMode) verifier.begin(true)
             Engine.setPeriodic(true, now)
             Engine.setCheckState(true, false, 0L)
         } else {
@@ -560,9 +562,8 @@ class PresenceService : LifecycleService() {
         checkStart = now; checkFirstFrame = 0L
         Engine.setCheckState(true, false, 0L)
         if (aggOn()) {
-            verifier.begin()
-            Engine.setStatusText(if (aggRecheck) "🔍 Rechecking after 2 min — verifying human…"
-                                 else "🔍 Verifying human (head, eyes, nose, movement)…")
+            verifier.begin(true)        // keeps looking until a human is confirmed or the 5 min window ends
+            Engine.setStatusText("🔍 Camera awake — checking for a human (up to 5 min, countdown keeps running)…")
         }
         wakeSource()
     }
@@ -572,7 +573,7 @@ class PresenceService : LifecycleService() {
         verifier.end()                          // deletes the temporary photos
         sleepFrom = now; sleepLenOverride = retryAfterMs
         sleepSource()
-        setAlarm(null)
+        if (!aggAlarmArmed) setAlarm(null)
         Engine.setCheckState(false, true, nextCheckAt())
     }
 
@@ -603,6 +604,7 @@ class PresenceService : LifecycleService() {
     private fun finishCheck(found: Boolean, now: Long, unseenReason: String? = null) {
         if (!periodic || !checking) return
         if (found) { onCheckFoundHuman(now); return }
+        if (aggOn()) { aggFail(now); return }
         Engine.checkFoundNobody(now, unseenReason)
         val s = Store.settingsFlow.value
         val retry = if (!pcMode && unseenReason != null) minOf(s.periodicIntervalMs, UNSEEN_RETRY_MS) else 0L
@@ -620,7 +622,7 @@ class PresenceService : LifecycleService() {
 
     /** A check (or the continuous watch) saw a human again. */
     private fun onCheckFoundHuman(now: Long) {
-        aggRecheck = false; aggAlarmArmed = false
+        aggAlarmArmed = false
         idleCycle = false; idleSince = now; holding = false
         if (autoPeriodic) {
             autoPeriodic = false
@@ -701,11 +703,12 @@ class PresenceService : LifecycleService() {
 
     // ---------- aggressive mode ----------
     //
-    // Check (camera on, timer keeps counting):  10 s  ->  +10 s  ->  +10 s   (majority of 8 signals, see HumanVerifier)
-    //   human confirmed          -> camera sleeps until the next interval, timer continues
-    //   nothing after 30 s       -> timer stops, camera OFF for 2 min, then ONE more 30 s check
-    //   still nothing            -> person-missing ALARM, camera stays on until a human is confirmed
-    // Pause / Stop silence everything.
+    // Every <interval> (e.g. 5 min) the camera wakes and checks CONTINUOUSLY for up to AGG_CHECK_WINDOW_MS (5 min).
+    // The main countdown keeps running the whole time, even while frames fail to show a human.
+    //   human confirmed at any moment in the window -> camera sleeps until the next interval, countdown continues
+    //   nobody confirmed for the full 5 min          -> ALARM rings, camera goes to sleep, countdown STOPS
+    // The alarm stops when the user presses Pause / Resume / Stop, or when a later check confirms a human.
+    // (A single check, rechecks after 2 min and the 30 s slices of the old logic are gone.)
 
     private fun aggOn(): Boolean = periodic && Store.settingsFlow.value.aggressiveMode
 
@@ -714,18 +717,19 @@ class PresenceService : LifecycleService() {
             val vs = verifier.snapshot()
             if (vs.confirmed) {
                 // Normal path is onFrameAnalyzed; this is the fallback if frames stopped right after confirming.
-                if (Engine.isPresent() && Engine.humanNow(now)) { holding = false; finishCheck(true, now) }
+                if (Engine.isPresent() && Engine.humanNow(now)) finishCheck(true, now)
                 return
             }
-            if (holding) {
-                // Continuous watching (after the failed recheck). The verifier never gives up here.
-                if (!verifier.isActive()) verifier.begin(true)
-                return
+            if (!verifier.isActive()) verifier.begin(true)
+            val elapsed = now - checkStart
+            if (vs.firstFrameAt == 0L && !pcMode && elapsed >= NO_FRAME_TIMEOUT_MS && elapsed < AppSettings.AGG_CHECK_WINDOW_MS) {
+                // Camera did not deliver a picture yet: keep waiting; it counts as "not seen" only at the window end.
+                Engine.setStatusText("⚠️ Waiting for camera picture… (${(AppSettings.AGG_CHECK_WINDOW_MS - elapsed) / 1000}s left)")
             }
-            if (vs.firstFrameAt == 0L) {
-                if (now - checkStart >= NO_FRAME_TIMEOUT_MS) aggFail(now, true)
-            } else if (vs.exhausted || now - vs.firstFrameAt >= HumanVerifier.TOTAL_MS + 3_000L) {
-                aggFail(now, false)
+            if (elapsed >= AppSettings.AGG_CHECK_WINDOW_MS) aggFail(now)
+            else if (vs.firstFrameAt != 0L) {
+                Engine.setStatusText("🔍 Checking for human… ${Fmt.time(AppSettings.AGG_CHECK_WINDOW_MS - elapsed)} left • countdown keeps running",
+                    if (Engine.isPresent()) StatusKind.RUNNING else StatusKind.IDLE)
             }
         } else if (sleeping) {
             val next = nextCheckAt()
@@ -734,26 +738,13 @@ class PresenceService : LifecycleService() {
         }
     }
 
-    /** A 30 s check ended without a confirmed human (or the camera showed no picture at all). */
-    private fun aggFail(now: Long, noPicture: Boolean) {
+    /** The full 5 min window ended without a confirmed human: alarm, camera sleeps, countdown stops. */
+    private fun aggFail(now: Long) {
         verifier.end()
-        if (noPicture && !pcMode) {
-            // Camera could not open (busy): do not count it as "person missing", just retry soon.
-            finishCheck(false, now, "⚠️ No camera picture — timer paused, will retry")
-            return
-        }
-        if (!aggRecheck) {
-            aggRecheck = true
-            Engine.checkFoundNobody(now, "🔴 Human not confirmed in 30 s — camera off, recheck in 2 min")
-            enterSleep(now, AppSettings.AGG_RECHECK_MS)
-        } else {
-            // Second chance failed too: alarm. Camera stays on and keeps verifying until a person is confirmed.
-            aggAlarmArmed = Engine.personWasSeen()
-            Engine.checkFoundNobody(now, if (aggAlarmArmed) "🚨 Human still missing — alarm" else "🔴 Nobody found — still watching")
-            holding = true; checking = true; sleeping = false
-            Engine.setCheckState(true, false, 0L)
-            verifier.begin(true)
-        }
+        aggAlarmArmed = true
+        Engine.checkFoundNobody(now, "🚨 No human for 5 min check — alarm, camera asleep, timer stopped")
+        enterSleep(now, 0L)             // camera off (enterSleep also silences the alarm; re-armed just below)
+        evaluateAlarm()
     }
 
     // ---------- alarm ----------
@@ -777,12 +768,11 @@ class PresenceService : LifecycleService() {
         }
 
         if (s.aggressiveMode) {
-            // Aggressive mode has its own rule: the alarm rings only after the 2-min recheck also failed.
-            if (periodic && sleeping) { setAlarm(null); return }
-            if (pcMode && !PcLink.framesFlowing(now)) { setAlarm(null); return }
+            // Aggressive mode rule: the alarm rings only after the full 5 min check failed. It keeps ringing while
+            // the camera sleeps, until Pause / Resume / Stop or until a later check confirms a human.
             setAlarm(when {
-                Engine.humanNow(now) -> if (s.humanAlarmEnabled) AlarmReason.DETECTED else null
                 aggAlarmArmed -> AlarmReason.MISSING
+                Engine.humanNow(now) -> if (s.humanAlarmEnabled) AlarmReason.DETECTED else null
                 else -> null
             })
             return

@@ -46,8 +46,8 @@ data class VerifySnapshot(
 /**
  * "Aggressive" human verification: tells a real person from a chair / coat / poster / photo.
  *
- * A check watches the camera for up to [TOTAL_MS] in slices of [SLICE_MS]. At the end of every slice the last
- * 10 seconds are judged on eight signals:
+ * A check watches the camera continuously (the service opens a 5 min window, see AppSettings.AGG_CHECK_WINDOW_MS) in
+ * slices of [SLICE_MS]. At the end of every slice the last 10 seconds are judged on eight signals:
  *
  *  FACE        a face with believable geometry is seen
  *  EYES        both eyes found, eye-open values present

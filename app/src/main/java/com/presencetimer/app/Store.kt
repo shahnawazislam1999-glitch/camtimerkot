@@ -43,8 +43,8 @@ data class AppSettings(
         /** Delayed alarm: how long the problem must last before the mp3 plays. */
         const val DELAYED_ALARM_MS = 2 * 60 * 1000L
         /** Continuous tracking with nobody in front of the camera for this long -> camera sleeps. */
-        /** Aggressive mode: camera stays off this long after a failed 30 s check, then checks once more. */
-        const val AGG_RECHECK_MS = 2 * 60 * 1000L
+        /** Aggressive mode: after the camera wakes it keeps checking for a human this long; no human -> alarm + sleep + timer stops. */
+        const val AGG_CHECK_WINDOW_MS = 5 * 60 * 1000L
         const val NO_HUMAN_SLEEP_MS = 5 * 60 * 1000L
         /** Auto reset cycle length. */
         const val AUTO_RESET_MS = 24 * 60 * 60 * 1000L
