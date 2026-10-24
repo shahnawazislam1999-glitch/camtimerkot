@@ -16,7 +16,8 @@ data class FrameResult(
     val bodyDetected: Boolean,
     val bodyConfidence: Float,
     val bodyBox: NBox?,
-    val blinked: Boolean = false     // an eye blink was completed in this frame
+    val blinked: Boolean = false,    // an eye blink was completed in this frame
+    val verdict: VerifyVerdict? = null   // aggressive mode: result of the multi-signal human check
 )
 
 data class LiveState(
@@ -229,6 +230,11 @@ object Engine {
         Store.notifyChanged()
     }
 
+    /** Shows a short status line (used by aggressive mode while it verifies / rechecks). */
+    fun setStatusText(text: String, kind: StatusKind = StatusKind.IDLE) {
+        _live.update { it.copy(status = text, statusKind = kind) }
+    }
+
     fun reportError(message: String?) {
         _live.update { it.copy(error = message) }
     }
@@ -283,7 +289,11 @@ object Engine {
             var blinkWaiting = false
             val faceDetected: Boolean
             val human: Boolean
-            if (blinkMode) {
+            if (r.verdict != null) {
+                // Aggressive mode: ONLY the multi-signal verifier decides (a chair never passes it).
+                faceDetected = r.verdict.confirmed
+                human = faceDetected
+            } else if (blinkMode) {
                 if (strongFace) lastFaceAt = now
                 else if (now - lastFaceAt > BLINK_FACE_LOST_MS) lastBlinkAt = 0
                 if (r.blinked && strongFace) lastBlinkAt = now
@@ -327,6 +337,7 @@ object Engine {
                 }
             }
 
+            if (r.verdict != null) text = r.verdict.text
             val faceBoxes = r.faces.map { it.box }
             publish {
                 it.copy(

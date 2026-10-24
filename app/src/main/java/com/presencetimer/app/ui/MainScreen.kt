@@ -769,6 +769,7 @@ private fun CameraSettingsSummary(settings: AppSettings, onOpen: () -> Unit) {
         add(if (pc) "PC camera" else "Phone camera")
         add(if (settings.periodicEnabled) "checks every ${settings.periodicValue}$unit" else "continuous")
         if (settings.idleSleepEnabled) add("sleeps after 5 min idle (wakes every ${settings.periodicValue}$unit)")
+        if (settings.aggressiveMode) add("aggressive human check")
         if (settings.blinkOnly) add("blink check on")
         if (settings.autoReset24h) add("24 h auto reset")
         if (settings.hideCamera) add("preview hidden")

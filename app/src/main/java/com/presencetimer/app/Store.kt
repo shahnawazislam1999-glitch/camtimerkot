@@ -30,6 +30,7 @@ data class AppSettings(
     val linkLostAlarmEnabled: Boolean = false,  // buzz immediately when the PC camera connection drops
     val delayedAlarmEnabled: Boolean = false,   // global: alarm only after DELAYED_ALARM_MS of no human / no PC link
     val idleSleepEnabled: Boolean = true,       // camera sleeps after NO_HUMAN_SLEEP_MS without a human, wakes every interval
+    val aggressiveMode: Boolean = false,        // multi-signal human verification (head/eyes/nose/movement), chair-proof
     val blinkOnly: Boolean = false,             // a person only counts after an eye blink was seen
     val autoReset24h: Boolean = false,          // main countdown goes back to 0 every 24 hours
     val autoResetAnchorMs: Long = 0L            // when the current 24 h cycle started
@@ -42,6 +43,8 @@ data class AppSettings(
         /** Delayed alarm: how long the problem must last before the mp3 plays. */
         const val DELAYED_ALARM_MS = 2 * 60 * 1000L
         /** Continuous tracking with nobody in front of the camera for this long -> camera sleeps. */
+        /** Aggressive mode: camera stays off this long after a failed 30 s check, then checks once more. */
+        const val AGG_RECHECK_MS = 2 * 60 * 1000L
         const val NO_HUMAN_SLEEP_MS = 5 * 60 * 1000L
         /** Auto reset cycle length. */
         const val AUTO_RESET_MS = 24 * 60 * 60 * 1000L
@@ -140,6 +143,7 @@ object Store {
                 linkLostAlarmEnabled = rawSettings.optBoolean("linkLostAlarmEnabled", false),
                 delayedAlarmEnabled = rawSettings.optBoolean("delayedAlarmEnabled", false),
                 idleSleepEnabled = rawSettings.optBoolean("idleSleepEnabled", true),
+                aggressiveMode = rawSettings.optBoolean("aggressiveMode", false),
                 blinkOnly = rawSettings.optBoolean("blinkOnly", false),
                 autoReset24h = rawSettings.optBoolean("autoReset24h", false),
                 autoResetAnchorMs = rawSettings.optLong("autoResetAnchorMs", 0L),
@@ -170,6 +174,7 @@ object Store {
             rawSettings.put("linkLostAlarmEnabled", s.linkLostAlarmEnabled)
             rawSettings.put("delayedAlarmEnabled", s.delayedAlarmEnabled)
             rawSettings.put("idleSleepEnabled", s.idleSleepEnabled)
+            rawSettings.put("aggressiveMode", s.aggressiveMode)
             rawSettings.put("blinkOnly", s.blinkOnly)
             rawSettings.put("autoReset24h", s.autoReset24h)
             rawSettings.put("autoResetAnchorMs", s.autoResetAnchorMs)

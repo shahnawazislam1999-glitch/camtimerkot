@@ -13,6 +13,17 @@ saved records, alarms and backup/restore. Adds what a web page cannot do:
 
 Detection is fully offline: ML Kit face detection and pose detection (body) ship inside the APK.
 
+## New in 1.4.0 - Aggressive human detection (Settings -> Aggressive human detection)
+Stops a chair, coat or photo from being counted as a person.
+- Every check (uses the Periodic interval, set to 5 min when you switch it on) the camera stays awake **10 s** and scores 8 signals:
+  face, eyes, nose, head shape (head over shoulders), head movement, hand movement, body movement, offline photo check.
+- **Majority (4 of 8) + one sign of life** (blink / eye movement / any movement) = human. A chair has no blink and no movement; a photo has no life.
+- **Head or body movement for ~1.2 s** = present immediately.
+- The main countdown **keeps running** during the check.
+- Not confirmed -> second 10 s, third 10 s (30 s total) -> still nobody: timer stops, **camera off**, reopens after **2 min** for one more 30 s check -> still nobody: **alarm rings** and the camera stays on until a human is confirmed.
+- Temporary photos (max 24, small JPEG) go to the app's private cache, are analysed offline on the phone and **deleted** when the check ends (also on stop / restart).
+- Limits: a very still person who never blinks or moves for 30 s, or a moving swivel chair with a coat, can still fool any camera check. Thresholds are constants in `HumanVerifier.kt` if you need to tune them.
+
 ## New in 1.3.0
 - **Camera sleeps when nobody is there**: no human on camera for 5 minutes in a row -> camera switches off. It wakes only at
   the interval you typed (Settings -> Camera power saving, 5 s .. 24 h) for a short check. Person found = normal tracking

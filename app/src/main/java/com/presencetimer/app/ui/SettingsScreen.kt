@@ -47,6 +47,35 @@ fun SettingsScreen(settings: AppSettings, live: LiveState, onBack: () -> Unit) {
             // Camera source + PC pairing
             PcSourceCard(settings, live.detecting)
 
+            // Aggressive human detection
+            Card {
+                SectionTitle("Aggressive human detection")
+                ToggleRow(
+                    "🛡 Aggressive mode (chair-proof)",
+                    "At every check (default every 5 min) the camera stays awake for 10 s and looks for REAL signs of " +
+                        "life: face, eyes, nose, head shape, head movement, hand movement, body movement and an offline " +
+                        "photo check. A majority must pass, plus one sign of life (blink / movement), so a chair, coat " +
+                        "or photo is not counted. Head or body movement for 1-2 s counts at once. " +
+                        "The main countdown keeps running during the check.\n" +
+                        "Not confirmed after 10 s -> checked again for 10 s, then 10 s more (30 s). Still nobody -> camera " +
+                        "turns off and timer stops, camera reopens after 2 min and checks once more; if the human is " +
+                        "still missing the alarm rings (works with the Pause / Stop buttons).\n" +
+                        "A few small temporary photos are saved in the app's private cache, analysed on the phone " +
+                        "(nothing is uploaded) and deleted as soon as the check ends.\n" +
+                        "Uses the interval of Periodic detection; replaces Blink verification and the 2-minute alarm while ON.",
+                    settings.aggressiveMode,
+                    extra = if (settings.aggressiveMode) live.detectionText else null
+                ) { v ->
+                    Store.updateSettings {
+                        if (v) it.copy(aggressiveMode = true, blinkOnly = false, idleSleepEnabled = false,
+                            periodicEnabled = true,
+                            periodicValue = if (it.periodicEnabled) it.periodicValue else 5,
+                            periodicUnit = if (it.periodicEnabled) it.periodicUnit else AppSettings.UNIT_MINUTES)
+                        else it.copy(aggressiveMode = false)
+                    }
+                }
+            }
+
             // Blink verification
             Card {
                 SectionTitle("Detection mode")

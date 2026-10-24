@@ -23,6 +23,7 @@ import kotlin.math.hypot
  * Mirrors the logic of isFaceGeometryPlausible / isBodyBoxPlausible in index.html.
  */
 class PresenceAnalyzer(
+    private val verifier: HumanVerifier,
     private val onResult: (FrameResult) -> Unit,
     private val onError: (String) -> Unit
 ) : ImageAnalysis.Analyzer {
@@ -56,7 +57,12 @@ class PresenceAnalyzer(
     @OptIn(ExperimentalGetImage::class)
     override fun analyze(proxy: ImageProxy) {
         val now = SystemClock.elapsedRealtime()
-        val interval = if (Store.settingsFlow.value.blinkOnly) BLINK_INTERVAL_MS else DETECTION_INTERVAL_MS
+        val st = Store.settingsFlow.value
+        val interval = when {
+            st.aggressiveMode && verifier.isActive() -> HumanVerifier.FRAME_INTERVAL_MS
+            st.blinkOnly -> BLINK_INTERVAL_MS
+            else -> DETECTION_INTERVAL_MS
+        }
         if (now - lastProcessed < interval) { proxy.close(); return }
         lastProcessed = now
 
@@ -69,7 +75,11 @@ class PresenceAnalyzer(
 
         try {
             val image = InputImage.fromMediaImage(media, rotation)
-            onResult(detect(image, w, h, flip))
+            // Temporary photo for the offline check (only while aggressive verification wants one).
+            val photo: (() -> Bitmap?)? = if (verifier.isActive() && verifier.wantsStill(now)) {
+                { try { rotateBitmap(proxy.toBitmap(), rotation) } catch (_: Throwable) { null } }
+            } else null
+            onResult(detect(image, w, h, flip, photo))
         } catch (e: Exception) {
             onError("Detection error: ${e.message ?: e.javaClass.simpleName}")
         } finally {
@@ -81,15 +91,18 @@ class PresenceAnalyzer(
     fun analyzeBitmap(bmp: Bitmap) {
         try {
             val image = InputImage.fromBitmap(bmp, 0)
-            onResult(detect(image, bmp.width, bmp.height, false))
+            val now = SystemClock.elapsedRealtime()
+            val photo: (() -> Bitmap?)? = if (verifier.isActive() && verifier.wantsStill(now)) { { bmp } } else null
+            onResult(detect(image, bmp.width, bmp.height, false, photo))
         } catch (e: Exception) {
             onError("Detection error: ${e.message ?: e.javaClass.simpleName}")
         }
     }
 
     /** Shared by the phone camera and the PC camera: face + body detection on one image. */
-    private fun detect(image: InputImage, w: Int, h: Int, flip: Boolean): FrameResult {
+    private fun detect(image: InputImage, w: Int, h: Int, flip: Boolean, photo: (() -> Bitmap?)? = null): FrameResult {
         val blinkMode = Store.settingsFlow.value.blinkOnly
+        val aggressive = Store.settingsFlow.value.aggressiveMode
         val faces = Tasks.await(faceDetector.process(image))
         val pairs = faces.mapNotNull { f -> toHit(f, w, h, flip)?.let { f to it } }
         val hits = pairs.map { it.second }
@@ -107,9 +120,13 @@ class PresenceAnalyzer(
         var bodyDetected = false
         var bodyConf = 0f
         var bodyBox: NBox? = null
+        var poseObs: PoseObs? = null
+        var bodyRect: FloatArray? = null
         // Blink mode only trusts a blinking face, so the (expensive) body model is skipped.
-        if (!blinkMode) try {
+        // Aggressive mode always needs the body model (head / hand / body movement).
+        if (!blinkMode || aggressive) try {
             val pose = Tasks.await(poseDetector.process(image))
+            poseObs = toPoseObs(pose)
             val good = pose.allPoseLandmarks.filter { it.inFrameLikelihood >= BODY_LANDMARK_MIN }
             val shoulders = listOfNotNull(
                 pose.getPoseLandmark(PoseLandmark.LEFT_SHOULDER),
@@ -125,13 +142,67 @@ class PresenceAnalyzer(
                     bodyDetected = true
                     bodyConf = good.map { it.inFrameLikelihood }.average().toFloat()
                     bodyBox = norm(minX, minY, maxX, maxY, w, h, flip, "BODY ${(bodyConf * 100).toInt()}%")
+                    bodyRect = floatArrayOf(minX / w, minY / h, maxX / w, maxY / h)
                 }
             }
         } catch (_: Exception) {
             // Pose model unavailable: face detection alone still works.
         }
 
-        return FrameResult(hits, bodyDetected, bodyConf, bodyBox, blinked)
+        // ---- aggressive mode: the multi-signal verifier makes the decision (chair-proof) ----
+        var verdict: VerifyVerdict? = null
+        if (aggressive) {
+            verdict = if (verifier.isActive()) {
+                val mainFace: Face? = if (main != null) main.first else null
+                val fo = if (mainFace != null) faceObs(mainFace, true, w, h) else null
+                val roi = unionRect(bodyRect, mainFace?.boundingBox, w, h)
+                val bmp = try { photo?.invoke() } catch (_: Throwable) { null }
+                verifier.observe(SystemClock.elapsedRealtime(), fo, poseObs, roi, bmp)
+            } else verifier.verdict()
+        }
+        return FrameResult(hits, bodyDetected, bodyConf, bodyBox, blinked, verdict)
+    }
+
+    private fun faceObs(f: Face, strong: Boolean, w: Int, h: Int): FaceObs {
+        val b = f.boundingBox
+        val le = f.getLandmark(FaceLandmark.LEFT_EYE)?.position
+        val re = f.getLandmark(FaceLandmark.RIGHT_EYE)?.position
+        val nose = f.getLandmark(FaceLandmark.NOSE_BASE)?.position
+        val mouth = f.getLandmark(FaceLandmark.MOUTH_BOTTOM)?.position
+        var noseOk = false
+        if (le != null && re != null && nose != null) {
+            val eyeMidX = (le.x + re.x) / 2f; val eyeMidY = (le.y + re.y) / 2f
+            val eyeDist = hypot(le.x - re.x, le.y - re.y)
+            noseOk = nose.y > eyeMidY && abs(nose.x - eyeMidX) <= eyeDist * 0.7f &&
+                (mouth == null || mouth.y > nose.y)
+        }
+        return FaceObs(
+            cx = b.exactCenterX(), cy = b.exactCenterY(), w = b.width().toFloat(), h = b.height().toFloat(),
+            eulerX = f.headEulerAngleX, eulerY = f.headEulerAngleY, eulerZ = f.headEulerAngleZ,
+            strong = strong, hasEyes = le != null && re != null, noseOk = noseOk,
+            eyeL = f.leftEyeOpenProbability, eyeR = f.rightEyeOpenProbability
+        )
+    }
+
+    private fun toPoseObs(pose: com.google.mlkit.vision.pose.Pose): PoseObs {
+        val m = HashMap<Int, Lm>()
+        for (l in pose.allPoseLandmarks) m[l.landmarkType] = Lm(l.position.x, l.position.y, l.inFrameLikelihood)
+        val ls = m[HumanVerifier.L_SHOULDER]; val rs = m[HumanVerifier.R_SHOULDER]
+        val scale = if (ls != null && rs != null && ls.p >= 0.5f && rs.p >= 0.5f)
+            hypot(ls.x - rs.x, ls.y - rs.y) else 0f
+        return PoseObs(m, scale)
+    }
+
+    /** Normalised (l,t,r,b) box around the person: union of body box and face box. */
+    private fun unionRect(body: FloatArray?, face: android.graphics.Rect?, w: Int, h: Int): FloatArray? {
+        var l = 2f; var t = 2f; var r = -1f; var b = -1f
+        if (body != null) { l = body[0]; t = body[1]; r = body[2]; b = body[3] }
+        if (face != null) {
+            l = minOf(l, face.left.toFloat() / w); t = minOf(t, face.top.toFloat() / h)
+            r = maxOf(r, face.right.toFloat() / w); b = maxOf(b, face.bottom.toFloat() / h)
+        }
+        if (r <= l || b <= t) return null
+        return floatArrayOf(l.coerceIn(0f, 1f), t.coerceIn(0f, 1f), r.coerceIn(0f, 1f), b.coerceIn(0f, 1f))
     }
 
     private fun norm(l: Float, t: Float, r: Float, b: Float, w: Int, h: Int, flip: Boolean, label: String): NBox {
