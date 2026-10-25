@@ -13,6 +13,10 @@ saved records, alarms and backup/restore. Adds what a web page cannot do:
 
 Detection is fully offline: ML Kit face detection and pose detection (body) ship inside the APK.
 
+## New in 1.6.0 (v22)
+- **Auto reset is now daily at 12 AM** (local midnight) instead of every 24 hours. Same toggle in Settings -> Auto reset; the unsaved time is saved as a record first, daily history untouched.
+- **Study time history** now sits right below the main countdown (no scrolling).
+
 ## New in 1.5.0 (v5) - Aggressive mode: new 5-minute check logic
 - Set the interval (e.g. 5 min). When it is due the camera **wakes** and checks continuously for a real human
   (8 signals, chair-proof - see `HumanVerifier.kt`).

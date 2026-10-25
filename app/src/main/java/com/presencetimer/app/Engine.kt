@@ -395,7 +395,7 @@ object Engine {
             lastSeen = if (present) now else 0
             Store.clearTimer()
             saveTimerState(now)
-            // Manual and automatic resets both start a fresh 24 h cycle.
+            // Manual and automatic resets both restart the daily-reset cycle (next reset at the coming 12 AM).
             if (Store.settingsFlow.value.autoReset24h) Store.updateSettings { it.copy(autoResetAnchorMs = now) }
             publish { it.copy(
                 status = if (present) "🟢 Human detected — New timer session" else "⚪ Timer reset",
@@ -421,8 +421,8 @@ object Engine {
     }
 
     /**
-     * 24 h auto reset: when the toggle is ON and 24 hours passed since the last reset (or since the toggle
-     * was switched on), the unsaved time is kept as a saved record and the main countdown goes back to 0.
+     * Daily auto reset: when the toggle is ON and the local clock has passed 12 AM (midnight) since the last
+     * reset (or since the toggle was switched on), the unsaved time is kept as a saved record and the main countdown goes back to 0.
      * Daily history is never touched. Called every second by the service and when the app opens, so a
      * reset that came due while nothing was running happens on the next start.
      */
@@ -433,12 +433,12 @@ object Engine {
             Store.updateSettings { it.copy(autoResetAnchorMs = now) }
             return
         }
-        if (now - s.autoResetAnchorMs < AppSettings.AUTO_RESET_MS) return
+        if (now < Fmt.nextMidnight(s.autoResetAnchorMs)) return
         synchronized(lock) {
             val again = Store.settingsFlow.value
             if (!again.autoReset24h || again.autoResetAnchorMs <= 0L ||
-                now - again.autoResetAnchorMs < AppSettings.AUTO_RESET_MS) return
-            saveSnapshot(now, "Auto-saved (24 h reset)")
+                now < Fmt.nextMidnight(again.autoResetAnchorMs)) return
+            saveSnapshot(now, "Auto-saved (12 AM reset)")
             resetTimer(now)     // also moves the anchor to now
         }
     }

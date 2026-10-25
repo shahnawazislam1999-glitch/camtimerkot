@@ -89,15 +89,14 @@ fun SettingsScreen(settings: AppSettings, live: LiveState, onBack: () -> Unit) {
                 ) { v -> Store.updateSettings { it.copy(blinkOnly = v) } }
             }
 
-            // 24 h auto reset
+            // Daily 12 AM auto reset
             Card {
                 SectionTitle("Auto reset")
-                val left = settings.autoResetAnchorMs + AppSettings.AUTO_RESET_MS - now
+                val left = Fmt.nextMidnight(maxOf(settings.autoResetAnchorMs, 1L)) - now
                 ToggleRow(
-                    "🔄 Reset main countdown every 24 hours",
-                    "When ON, the main countdown goes back to 00:00:00 automatically 24 hours after the last reset " +
-                        "(or after you switched this on). The time is saved as a record first, and your daily " +
-                        "study history is never touched.",
+                    "🔄 Reset main countdown every day at 12 AM",
+                    "When ON, the main countdown goes back to 00:00:00 automatically every day at 12 AM (midnight). " +
+                        "The time is saved as a record first, and your daily study history is never touched.",
                     settings.autoReset24h,
                     extra = if (settings.autoReset24h && settings.autoResetAnchorMs > 0) "Next automatic reset in ${Fmt.time(left)}" else null
                 ) { v ->

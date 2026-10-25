@@ -141,6 +141,28 @@ fun MainScreen(lifecycle: Lifecycle, perms: PermState, pendingImportLabel: Strin
 
                 StatusPill(live)
 
+                // Study history
+                Card {
+                    TitleRow("Study time history") { SmallBtn("↻") { Store.notifyChanged() } }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Stat("This month", Fmt.time(stats.monthMs), Modifier.weight(1f))
+                        Stat("Days studied", stats.daysThisMonth.toString(), Modifier.weight(1f))
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    if (daily.isEmpty()) Text("Study time will be saved automatically by date.",
+                        color = Color(0xFF666666), fontSize = 12.5.sp)
+                    daily.forEach { e ->
+                        Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Column {
+                                Text(Fmt.prettyDate(e.key), fontSize = 12.5.sp)
+                                Text(e.key.substring(0, 7), color = Muted, fontSize = 11.sp)
+                            }
+                            Text(Fmt.time(e.value), fontSize = 12.5.sp, fontWeight = FontWeight.Bold, style = tnum)
+                        }
+                        Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0xFF151515)))
+                    }
+                }
+
                 if (!settings.hideCamera) {
                     if (settings.cameraSource == AppSettings.SOURCE_PC) PcCameraCard(live)
                     else CameraCard(live, lifecycle)
@@ -237,28 +259,6 @@ fun MainScreen(lifecycle: Lifecycle, perms: PermState, pendingImportLabel: Strin
                                 Text(Fmt.dateTime(r.timestamp), color = Muted, fontSize = 11.sp)
                             }
                             Text(Fmt.time(r.durationMs), fontSize = 12.5.sp, fontWeight = FontWeight.Bold, style = tnum)
-                        }
-                        Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0xFF151515)))
-                    }
-                }
-
-                // Study history
-                Card {
-                    TitleRow("Study time history") { SmallBtn("↻") { Store.notifyChanged() } }
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Stat("This month", Fmt.time(stats.monthMs), Modifier.weight(1f))
-                        Stat("Days studied", stats.daysThisMonth.toString(), Modifier.weight(1f))
-                    }
-                    Spacer(Modifier.height(8.dp))
-                    if (daily.isEmpty()) Text("Study time will be saved automatically by date.",
-                        color = Color(0xFF666666), fontSize = 12.5.sp)
-                    daily.forEach { e ->
-                        Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Column {
-                                Text(Fmt.prettyDate(e.key), fontSize = 12.5.sp)
-                                Text(e.key.substring(0, 7), color = Muted, fontSize = 11.sp)
-                            }
-                            Text(Fmt.time(e.value), fontSize = 12.5.sp, fontWeight = FontWeight.Bold, style = tnum)
                         }
                         Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0xFF151515)))
                     }
@@ -771,7 +771,7 @@ private fun CameraSettingsSummary(settings: AppSettings, onOpen: () -> Unit) {
         if (settings.idleSleepEnabled) add("sleeps after 5 min idle (wakes every ${settings.periodicValue}$unit)")
         if (settings.aggressiveMode) add("aggressive human check")
         if (settings.blinkOnly) add("blink check on")
-        if (settings.autoReset24h) add("24 h auto reset")
+        if (settings.autoReset24h) add("daily 12 AM reset")
         if (settings.hideCamera) add("preview hidden")
         if (settings.delayedAlarmEnabled) add("2 min alarm on")
         if (pc && settings.linkLostAlarmEnabled) add("disconnect alarm on")
