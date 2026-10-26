@@ -13,6 +13,11 @@ saved records, alarms and backup/restore. Adds what a web page cannot do:
 
 Detection is fully offline: ML Kit face detection and pose detection (body) ship inside the APK.
 
+## New in 1.9.0 - Pause on screen lock
+- Settings -> **Screen lock** -> *Pause when screen turns off*: power button / lock = camera sleeps + countdown pauses.
+- *Resume when unlocked* (default ON) continues automatically after unlock; otherwise press Resume.
+- A pause you made yourself is never resumed automatically.
+
 ## New in 1.8.0 - Eye-closed detection
 - Settings -> **Eye-closed detection** (toggle). Uses the interval of *Check for a human only every…* (default 5 min).
 - When the interval is due the camera **wakes** and checks continuously. The **main countdown keeps running** during the check.

@@ -6,7 +6,9 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
+import android.content.BroadcastReceiver
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.graphics.BitmapFactory
@@ -177,6 +179,22 @@ class PresenceService : LifecycleService() {
     // ---- eye-closed mode ----
     private val eyeTracker = EyeClosedTracker()
     private var eyeAlarmArmed = false           // eyes were closed 5 min in a row: alarm rings until the user acts / eyes are seen open
+    private var pausedByScreen = false            // the current pause was caused by the screen turning off / locking
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (!running) return
+            val s = Store.settingsFlow.value
+            when (intent?.action) {
+                Intent.ACTION_SCREEN_OFF ->
+                    if (s.pauseOnScreenOff && !Engine.isPaused()) { pauseNow(); pausedByScreen = true }
+                Intent.ACTION_USER_PRESENT ->
+                    if (pausedByScreen && Engine.isPaused()) {
+                        pausedByScreen = false
+                        if (s.pauseOnScreenOff && s.resumeOnUnlock) startNow()
+                    }
+            }
+        }
+    }
     private var eyeStopped = false                // eye check failed: camera stays OFF for good until Resume / Pause / Stop
     @Volatile private var eyeHumanSeen = false            // a human was in the picture at some point of this check
 
@@ -223,6 +241,9 @@ class PresenceService : LifecycleService() {
         alarm = AlarmPlayer(this)
         createChannel()
         ProcessLifecycleOwner.get().lifecycle.addObserver(processObserver)
+        val screenFilter = IntentFilter().apply { addAction(Intent.ACTION_SCREEN_OFF); addAction(Intent.ACTION_USER_PRESENT) }
+        if (Build.VERSION.SDK_INT >= 33) registerReceiver(screenReceiver, screenFilter, Context.RECEIVER_NOT_EXPORTED)
+        else registerReceiver(screenReceiver, screenFilter)
 
         // React to settings changes (overlay on/off, alarm toggles) while running.
         lifecycleScope.launch {
@@ -265,6 +286,7 @@ class PresenceService : LifecycleService() {
      */
     private fun startNow() {
         if (!running) return
+        pausedByScreen = false
         val wasPaused = Engine.isPaused()
         if (wasPaused) Engine.setPaused(false)
         // Pause switched the camera / PC stream off: turn it back on now (unless periodic sleep handles it below).
@@ -293,6 +315,7 @@ class PresenceService : LifecycleService() {
     /** Manual pause: freeze the timer AND stop looking at the camera until the user resumes. */
     private fun pauseNow() {
         if (!running) return
+        pausedByScreen = false
         Engine.setPaused(true)
         verifier.end(); aggAlarmArmed = false; eyeAlarmArmed = false; eyeStopped = false
         if (!(periodic && sleeping)) sleepSource()      // already off while periodic-sleeping
@@ -457,6 +480,7 @@ class PresenceService : LifecycleService() {
             Engine.stopDetection()
         }
         ProcessLifecycleOwner.get().lifecycle.removeObserver(processObserver)
+        try { unregisterReceiver(screenReceiver) } catch (_: Exception) { }
         tickJob?.cancel()
         alarm.stop()
         overlay.hide()

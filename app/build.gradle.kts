@@ -11,8 +11,8 @@ android {
         applicationId = "com.presencetimer.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 12
-        versionName = "1.8.3"
+        versionCode = 13
+        versionName = "1.9.0"
     }
 
     buildTypes {

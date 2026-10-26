@@ -35,7 +35,9 @@ data class AppSettings(
     val autoReset24h: Boolean = false,          // main countdown goes back to 0 every 24 hours
     val autoResetAnchorMs: Long = 0L,           // when the current 24 h cycle started
     val eyeClosedDetect: Boolean = false,       // eyes closed for 5 min in a row at a check -> timer stops (+ alarm)
-    val eyeClosedAlarm: Boolean = true          // eye-closed: true = ring the alarm too, false = only stop the timer
+    val eyeClosedAlarm: Boolean = true,         // eye-closed: true = ring the alarm too, false = only stop the timer
+    val pauseOnScreenOff: Boolean = false,      // power button / screen lock -> pause (camera sleeps, countdown pauses)
+    val resumeOnUnlock: Boolean = true          // ...and carry on automatically when the phone is unlocked again
 ) {
     /** Blink verification only applies while neither aggressive nor eye-closed mode is on. */
     val blinkActive: Boolean
@@ -176,6 +178,8 @@ object Store {
                 autoResetAnchorMs = rawSettings.optLong("autoResetAnchorMs", 0L),
                 eyeClosedDetect = rawSettings.optBoolean("eyeClosedDetect", false),
                 eyeClosedAlarm = rawSettings.optBoolean("eyeClosedAlarm", true),
+                pauseOnScreenOff = rawSettings.optBoolean("pauseOnScreenOff", false),
+                resumeOnUnlock = rawSettings.optBoolean("resumeOnUnlock", true),
                 periodicUnit = rawSettings.optInt("periodicUnit", AppSettings.UNIT_MINUTES)
                     .coerceIn(AppSettings.UNIT_SECONDS, AppSettings.UNIT_MINUTES)
             ).let { it.copy(periodicValue = AppSettings.clampValue(rawSettings.optInt("periodicValue", 10), it.periodicUnit)) }
@@ -210,6 +214,8 @@ object Store {
             rawSettings.put("autoResetAnchorMs", s.autoResetAnchorMs)
             rawSettings.put("eyeClosedDetect", s.eyeClosedDetect)
             rawSettings.put("eyeClosedAlarm", s.eyeClosedAlarm)
+            rawSettings.put("pauseOnScreenOff", s.pauseOnScreenOff)
+            rawSettings.put("resumeOnUnlock", s.resumeOnUnlock)
             prefs.edit().putString(KEY_SETTINGS, rawSettings.toString()).apply()
             settingsFlow.update { s }
         }

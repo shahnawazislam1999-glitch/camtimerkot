@@ -61,6 +61,23 @@ fun SettingsScreen(settings: AppSettings, live: LiveState, onBack: () -> Unit) {
             // Camera source + PC pairing
             PcSourceCard(settings, live.detecting)
 
+            // Screen lock / power button
+            Card {
+                SectionTitle("Screen lock")
+                ToggleRow(
+                    "🔒 Pause when screen turns off",
+                    "When you press the power button or the phone locks, the camera goes to sleep and the countdown pauses.",
+                    settings.pauseOnScreenOff
+                ) { v -> Store.updateSettings { it.copy(pauseOnScreenOff = v) } }
+                if (settings.pauseOnScreenOff) {
+                    ToggleRow(
+                        "🔓 Resume when unlocked",
+                        "Carry on automatically after you unlock the phone. If off, press Resume yourself.",
+                        settings.resumeOnUnlock
+                    ) { v -> Store.updateSettings { it.copy(resumeOnUnlock = v) } }
+                }
+            }
+
             // Aggressive human detection
             Card {
                 SectionTitle("Aggressive human detection")
