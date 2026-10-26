@@ -49,6 +49,8 @@ class PresenceAnalyzer(
         const val DETECTION_INTERVAL_MS = 200L
         /** Blinks last ~100-300 ms, so blink verification needs a faster frame rate (~12 fps). */
         const val BLINK_INTERVAL_MS = 80L
+        /** Eye-closed mode: eyes stay closed for minutes, so ~7 fps is plenty (and saves battery). */
+        const val EYE_INTERVAL_MS = 150L
         const val BODY_LANDMARK_MIN = 0.6f        // per-landmark in-frame likelihood
         const val BODY_MIN_LANDMARKS = 8          // landmarks needed to call it a body
         const val SHOULDER_MIN = 0.5f
@@ -60,7 +62,8 @@ class PresenceAnalyzer(
         val st = Store.settingsFlow.value
         val interval = when {
             st.aggressiveMode && verifier.isActive() -> HumanVerifier.FRAME_INTERVAL_MS
-            st.blinkOnly -> BLINK_INTERVAL_MS
+            st.blinkActive -> BLINK_INTERVAL_MS
+            st.eyeClosedDetect -> EYE_INTERVAL_MS
             else -> DETECTION_INTERVAL_MS
         }
         if (now - lastProcessed < interval) { proxy.close(); return }
@@ -101,7 +104,7 @@ class PresenceAnalyzer(
 
     /** Shared by the phone camera and the PC camera: face + body detection on one image. */
     private fun detect(image: InputImage, w: Int, h: Int, flip: Boolean, photo: (() -> Bitmap?)? = null): FrameResult {
-        val blinkMode = Store.settingsFlow.value.blinkOnly
+        val blinkMode = Store.settingsFlow.value.blinkActive
         val aggressive = Store.settingsFlow.value.aggressiveMode
         val faces = Tasks.await(faceDetector.process(image))
         val pairs = faces.mapNotNull { f -> toHit(f, w, h, flip)?.let { f to it } }
@@ -116,6 +119,12 @@ class PresenceAnalyzer(
         } else {
             blink.reset()
         }
+
+        // Eye state of the same face (eye-closed mode). Only a face that passed the geometry checks counts.
+        val eye = if (main != null)
+            EyeState.classify(main.first.leftEyeOpenProbability, main.first.rightEyeOpenProbability,
+                main.first.headEulerAngleY)
+        else EyeState.NONE
 
         var bodyDetected = false
         var bodyConf = 0f
@@ -160,7 +169,7 @@ class PresenceAnalyzer(
                 verifier.observe(SystemClock.elapsedRealtime(), fo, poseObs, roi, bmp)
             } else verifier.verdict()
         }
-        return FrameResult(hits, bodyDetected, bodyConf, bodyBox, blinked, verdict)
+        return FrameResult(hits, bodyDetected, bodyConf, bodyBox, blinked, verdict, eye)
     }
 
     private fun faceObs(f: Face, strong: Boolean, w: Int, h: Int): FaceObs {
@@ -285,5 +294,84 @@ class BlinkTracker {
         }
         if (closed && state == 1) { state = 2; closedAt = now }
         return false
+    }
+}
+
+
+/** Snapshot of [EyeClosedTracker] for the service. */
+data class EyeSnapshot(
+    val closedMs: Long,        // how long the eyes have been closed WITHOUT a break (0 = not closed right now)
+    val passed: Boolean,       // awake: eyes seen open for a moment, or a face whose eyes cannot be measured
+    val faceSeen: Boolean      // a usable face was seen since the last reset
+)
+
+/**
+ * Measures how long both eyes have been closed WITHOUT a break.
+ *
+ *  - CLOSED frame            starts / continues the streak.
+ *  - MAYBE frame (half shut)  keeps the streak alive but does not add evidence.
+ *  - OPEN frames              break the streak only after they last [OPEN_CONFIRM_MS] in a row, so one noisy
+ *                             frame of a sleeping person cannot reset it, but a person who really opens their
+ *                             eyes ( = awake ) always does. That also marks the check as "passed".
+ *  - No face / eyes not measurable: the streak survives at most [GAP_TOLERANCE_MS] (head dropped, brief
+ *                             detector miss). Longer than that the streak is cancelled - never alarm on a guess.
+ *  - A face whose eyes cannot be measured for [UNKNOWN_CONFIRM_MS] (sunglasses, head turned) counts as "passed",
+ *                             so such a person never gets a false eyes-closed alarm.
+ */
+class EyeClosedTracker {
+    companion object {
+        const val OPEN_CONFIRM_MS = 1_200L
+        const val GAP_TOLERANCE_MS = 10_000L
+        const val UNKNOWN_CONFIRM_MS = 5_000L
+    }
+
+    private val lock = Any()
+    private var closedSince = 0L
+    private var lastKeepAt = 0L
+    private var openRunStart = 0L
+    private var unknownRunStart = 0L
+    private var passed = false
+    private var faceSeen = false
+
+    fun reset() {
+        synchronized(lock) {
+            closedSince = 0L; lastKeepAt = 0L; openRunStart = 0L; unknownRunStart = 0L
+            passed = false; faceSeen = false
+        }
+    }
+
+    /** [now] = System.currentTimeMillis(). Called for every analysed frame. */
+    fun update(state: Int, now: Long) {
+        synchronized(lock) {
+        if (state != EyeState.NONE) faceSeen = true
+        when (state) {
+            EyeState.CLOSED -> {
+                openRunStart = 0L; unknownRunStart = 0L
+                if (closedSince == 0L) closedSince = now
+                lastKeepAt = now
+            }
+            EyeState.MAYBE -> {
+                unknownRunStart = 0L
+                if (closedSince != 0L) lastKeepAt = now
+            }
+            EyeState.OPEN -> {
+                unknownRunStart = 0L
+                if (openRunStart == 0L) openRunStart = now
+                if (now - openRunStart >= OPEN_CONFIRM_MS) { passed = true; closedSince = 0L }
+            }
+            EyeState.UNKNOWN -> {
+                openRunStart = 0L
+                if (unknownRunStart == 0L) unknownRunStart = now
+                if (now - unknownRunStart >= UNKNOWN_CONFIRM_MS) { passed = true; closedSince = 0L }
+            }
+            else -> { openRunStart = 0L; unknownRunStart = 0L }
+        }
+        if (closedSince != 0L && now - lastKeepAt > GAP_TOLERANCE_MS) closedSince = 0L
+        }
+    }
+
+    fun snapshot(now: Long): EyeSnapshot = synchronized(lock) {
+        val closed = if (closedSince != 0L && now - lastKeepAt <= GAP_TOLERANCE_MS) now - closedSince else 0L
+        EyeSnapshot(closed, passed, faceSeen)
     }
 }

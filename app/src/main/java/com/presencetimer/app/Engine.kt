@@ -11,13 +11,38 @@ data class NBox(val l: Float, val t: Float, val r: Float, val b: Float, val labe
 
 data class FaceHit(val box: NBox, val strong: Boolean)
 
+/** What the eyes of the main face looked like in one frame (used by the eye-closed mode). */
+object EyeState {
+    const val NONE = 0       // no usable face
+    const val OPEN = 1
+    const val CLOSED = 2     // both eyes clearly closed
+    const val UNKNOWN = 3    // face seen but the eyes cannot be measured (head turned far, no probabilities)
+    const val MAYBE = 4      // in between (squint, half-closed, blink in progress)
+
+    private const val CLOSED_MAX = 0.30f   // the BETTER eye is still below this -> both eyes are closed
+    private const val OPEN_MIN = 0.55f     // at least one eye clearly open
+    private const val MAX_YAW = 40f        // beyond this the eye probabilities are not reliable
+
+    fun classify(left: Float?, right: Float?, yaw: Float): Int {
+        if (left == null || right == null) return UNKNOWN
+        if (kotlin.math.abs(yaw) > MAX_YAW) return UNKNOWN
+        val best = maxOf(left, right)
+        return when {
+            best <= CLOSED_MAX -> CLOSED
+            best >= OPEN_MIN -> OPEN
+            else -> MAYBE
+        }
+    }
+}
+
 data class FrameResult(
     val faces: List<FaceHit>,
     val bodyDetected: Boolean,
     val bodyConfidence: Float,
     val bodyBox: NBox?,
     val blinked: Boolean = false,    // an eye blink was completed in this frame
-    val verdict: VerifyVerdict? = null   // aggressive mode: result of the multi-signal human check
+    val verdict: VerifyVerdict? = null,  // aggressive mode: result of the multi-signal human check
+    val eye: Int = EyeState.NONE         // eye-closed mode: state of the eyes of the main face
 )
 
 data class LiveState(
@@ -275,7 +300,7 @@ object Engine {
         synchronized(lock) {
             if (!detecting) return false
 
-            val blinkMode = Store.settingsFlow.value.blinkOnly
+            val blinkMode = Store.settingsFlow.value.blinkActive
             val strongFace = r.faces.any { it.strong }
             val hasFace = r.faces.isNotEmpty()
             val corroborated = hasFace && r.bodyDetected

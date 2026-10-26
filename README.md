@@ -13,6 +13,16 @@ saved records, alarms and backup/restore. Adds what a web page cannot do:
 
 Detection is fully offline: ML Kit face detection and pose detection (body) ship inside the APK.
 
+## New in 1.8.0 - Eye-closed detection
+- Settings -> **Eye-closed detection** (toggle). Uses the interval of *Check for a human only every…* (default 5 min).
+- When the interval is due the camera **wakes** and looks at your eyes. The **main countdown keeps running** during the check.
+- Eyes seen **open** -> check passed, camera sleeps until the next interval.
+- Eyes **closed 5 minutes in a row with no break** -> **countdown stops, camera goes off** and (option) the **alarm rings**.
+- Option **Ring alarm + stop timer** / **Only stop timer** (no sound). The alarm stops with Pause / Resume / Stop, or when a later check sees open eyes.
+- Opening the eyes for ~1.2 s breaks the streak (the 5 minutes start over); single noisy frames are ignored.
+  Eyes that cannot be measured (sunglasses, head turned far) never trigger the alarm.
+- Replaces Aggressive mode and Blink verification while ON. Limits: `AppSettings.EYE_CLOSED_LIMIT_MS`, thresholds in `EyeState` (Engine.kt), streak logic in `EyeClosedTracker` (Detector.kt).
+
 ## New in 1.7.0 - remote pause / start (PC console + SMS)
 - **From the PC console (PC camera mode):** PresenceCam 2.1 shows your main countdown live in big digits and you press
   **`1` = pause**, **`2` = start** (one key, no Enter). The phone sends its timer state to the PC every second and obeys only

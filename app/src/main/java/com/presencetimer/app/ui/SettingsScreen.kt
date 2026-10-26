@@ -80,12 +80,53 @@ fun SettingsScreen(settings: AppSettings, live: LiveState, onBack: () -> Unit) {
                     extra = if (settings.aggressiveMode) live.detectionText else null
                 ) { v ->
                     Store.updateSettings {
-                        if (v) it.copy(aggressiveMode = true, blinkOnly = false, idleSleepEnabled = false,
+                        if (v) it.copy(aggressiveMode = true, eyeClosedDetect = false, blinkOnly = false, idleSleepEnabled = false,
                             periodicEnabled = true,
                             periodicValue = if (it.periodicEnabled) it.periodicValue else 5,
                             periodicUnit = if (it.periodicEnabled) it.periodicUnit else AppSettings.UNIT_MINUTES)
                         else it.copy(aggressiveMode = false)
                     }
+                }
+            }
+
+            // Eye-closed (sleep) detection
+            Card {
+                SectionTitle("Eye-closed detection")
+                ToggleRow(
+                    "😴 Eye-closed detection",
+                    "Every interval (default 5 min) the camera wakes up and looks at your eyes. The main countdown " +
+                        "keeps running during the check (it never pauses while looking).\n" +
+                        "Eyes seen OPEN -> all fine, camera sleeps until the next interval.\n" +
+                        "Eyes CLOSED for 5 minutes in a row without a break -> the main countdown STOPS, the alarm " +
+                        "rings (if the option below is on) and the camera switches off.\n" +
+                        "If you open your eyes for a moment the 5 minutes start over. Pause / Resume / Stop silence the alarm.\n" +
+                        "Uses the interval of Periodic detection; replaces Aggressive mode and Blink verification while ON.",
+                    settings.eyeClosedDetect,
+                    extra = if (settings.eyeClosedDetect) live.detectionText else null
+                ) { v ->
+                    Store.updateSettings {
+                        if (v) it.copy(eyeClosedDetect = true, aggressiveMode = false, blinkOnly = false,
+                            periodicEnabled = true,
+                            periodicValue = if (it.periodicEnabled) it.periodicValue else 5,
+                            periodicUnit = if (it.periodicEnabled) it.periodicUnit else AppSettings.UNIT_MINUTES)
+                        else it.copy(eyeClosedDetect = false)
+                    }
+                }
+                if (settings.eyeClosedDetect) {
+                    Text("When eyes stay closed for 5 minutes", fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(top = 8.dp))
+                    Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Chip("🔔 Ring alarm + stop timer", settings.eyeClosedAlarm, Modifier.weight(1f)) {
+                            Store.updateSettings { it.copy(eyeClosedAlarm = true) }
+                        }
+                        Chip("⏹ Only stop timer", !settings.eyeClosedAlarm, Modifier.weight(1f)) {
+                            Store.updateSettings { it.copy(eyeClosedAlarm = false) }
+                        }
+                    }
+                    Text(if (settings.eyeClosedAlarm)
+                        "The alarm rings until you press Pause / Resume / Stop, or until a later check sees your eyes open."
+                    else "No sound: the countdown just stops and the camera goes to sleep. A later check that sees your eyes open starts it again.",
+                        color = Muted, fontSize = 11.5.sp, modifier = Modifier.padding(top = 6.dp))
                 }
             }
 

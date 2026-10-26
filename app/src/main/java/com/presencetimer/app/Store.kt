@@ -33,8 +33,14 @@ data class AppSettings(
     val aggressiveMode: Boolean = false,        // multi-signal human verification (head/eyes/nose/movement), chair-proof
     val blinkOnly: Boolean = false,             // a person only counts after an eye blink was seen
     val autoReset24h: Boolean = false,          // main countdown goes back to 0 every 24 hours
-    val autoResetAnchorMs: Long = 0L            // when the current 24 h cycle started
+    val autoResetAnchorMs: Long = 0L,           // when the current 24 h cycle started
+    val eyeClosedDetect: Boolean = false,       // eyes closed for 5 min in a row at a check -> timer stops (+ alarm)
+    val eyeClosedAlarm: Boolean = true          // eye-closed: true = ring the alarm too, false = only stop the timer
 ) {
+    /** Blink verification only applies while neither aggressive nor eye-closed mode is on. */
+    val blinkActive: Boolean
+        get() = blinkOnly && !aggressiveMode && !eyeClosedDetect
+
     /** Time between two camera checks in periodic mode. */
     val periodicIntervalMs: Long
         get() = periodicValue.toLong() * (if (periodicUnit == UNIT_SECONDS) 1000L else 60_000L)
@@ -46,6 +52,10 @@ data class AppSettings(
         /** Aggressive mode: after the camera wakes it keeps checking for a human this long; no human -> alarm + sleep + timer stops. */
         const val AGG_CHECK_WINDOW_MS = 5 * 60 * 1000L
         const val NO_HUMAN_SLEEP_MS = 5 * 60 * 1000L
+        /** Eye-closed mode: eyes must stay closed this long, without a break, to trigger. */
+        const val EYE_CLOSED_LIMIT_MS = 5 * 60 * 1000L
+        /** Eye-closed mode: longest a single check may last when no closed-eye streak is running. */
+        const val EYE_CHECK_WINDOW_MS = EYE_CLOSED_LIMIT_MS + 30_000L
         /** Auto reset cycle length. */
         const val AUTO_RESET_MS = 24 * 60 * 60 * 1000L
         const val SOURCE_PHONE = 0
@@ -164,6 +174,8 @@ object Store {
                 blinkOnly = rawSettings.optBoolean("blinkOnly", false),
                 autoReset24h = rawSettings.optBoolean("autoReset24h", false),
                 autoResetAnchorMs = rawSettings.optLong("autoResetAnchorMs", 0L),
+                eyeClosedDetect = rawSettings.optBoolean("eyeClosedDetect", false),
+                eyeClosedAlarm = rawSettings.optBoolean("eyeClosedAlarm", true),
                 periodicUnit = rawSettings.optInt("periodicUnit", AppSettings.UNIT_MINUTES)
                     .coerceIn(AppSettings.UNIT_SECONDS, AppSettings.UNIT_MINUTES)
             ).let { it.copy(periodicValue = AppSettings.clampValue(rawSettings.optInt("periodicValue", 10), it.periodicUnit)) }
@@ -196,6 +208,8 @@ object Store {
             rawSettings.put("blinkOnly", s.blinkOnly)
             rawSettings.put("autoReset24h", s.autoReset24h)
             rawSettings.put("autoResetAnchorMs", s.autoResetAnchorMs)
+            rawSettings.put("eyeClosedDetect", s.eyeClosedDetect)
+            rawSettings.put("eyeClosedAlarm", s.eyeClosedAlarm)
             prefs.edit().putString(KEY_SETTINGS, rawSettings.toString()).apply()
             settingsFlow.update { s }
         }
