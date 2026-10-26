@@ -52,8 +52,8 @@ data class AppSettings(
         /** Aggressive mode: after the camera wakes it keeps checking for a human this long; no human -> alarm + sleep + timer stops. */
         const val AGG_CHECK_WINDOW_MS = 5 * 60 * 1000L
         const val NO_HUMAN_SLEEP_MS = 5 * 60 * 1000L
-        /** Eye-closed mode: eyes must stay closed this long, without a break, to trigger. */
-        const val EYE_CLOSED_LIMIT_MS = 5 * 60 * 1000L
+        /** Eye-closed mode: the camera checks continuously this long; no open eyes seen in that time -> stop. */
+        const val EYE_CLOSED_LIMIT_MS = 2 * 60 * 1000L
         /** Eye-closed mode: longest a single check may last when no closed-eye streak is running. */
         const val EYE_CHECK_WINDOW_MS = EYE_CLOSED_LIMIT_MS + 30_000L
         /** Auto reset cycle length. */

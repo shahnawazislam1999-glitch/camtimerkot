@@ -315,14 +315,12 @@ data class EyeSnapshot(
  *                             eyes ( = awake ) always does. That also marks the check as "passed".
  *  - No face / eyes not measurable: the streak survives at most [GAP_TOLERANCE_MS] (head dropped, brief
  *                             detector miss). Longer than that the streak is cancelled - never alarm on a guess.
- *  - A face whose eyes cannot be measured for [UNKNOWN_CONFIRM_MS] (sunglasses, head turned) counts as "passed",
- *                             so such a person never gets a false eyes-closed alarm.
+ *  - Only OPEN eyes pass the check. Eyes that cannot be measured (sunglasses, head turned) do NOT pass it.
  */
 class EyeClosedTracker {
     companion object {
         const val OPEN_CONFIRM_MS = 1_200L
         const val GAP_TOLERANCE_MS = 10_000L
-        const val UNKNOWN_CONFIRM_MS = 5_000L
     }
 
     private val lock = Any()
@@ -362,7 +360,6 @@ class EyeClosedTracker {
             EyeState.UNKNOWN -> {
                 openRunStart = 0L
                 if (unknownRunStart == 0L) unknownRunStart = now
-                if (now - unknownRunStart >= UNKNOWN_CONFIRM_MS) { passed = true; closedSince = 0L }
             }
             else -> { openRunStart = 0L; unknownRunStart = 0L }
         }

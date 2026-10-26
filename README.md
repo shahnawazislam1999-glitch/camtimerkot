@@ -15,13 +15,12 @@ Detection is fully offline: ML Kit face detection and pose detection (body) ship
 
 ## New in 1.8.0 - Eye-closed detection
 - Settings -> **Eye-closed detection** (toggle). Uses the interval of *Check for a human only every…* (default 5 min).
-- When the interval is due the camera **wakes** and looks at your eyes. The **main countdown keeps running** during the check.
-- Eyes seen **open** -> check passed, camera sleeps until the next interval.
-- Eyes **closed 5 minutes in a row with no break** -> **countdown stops, camera goes off** and (option) the **alarm rings**.
+- When the interval is due the camera **wakes** and checks continuously. The **main countdown keeps running** during the check.
+- Eyes seen **open** (~1.2 s) -> awake, check passed, camera sleeps until the next interval.
+- **No open eyes for 2 minutes in a row** (eyes closed, eyes not visible, face hidden, or only the body / head detected) -> **countdown stops, camera goes off** and (option) the **alarm rings**.
+- Nobody on camera at all -> timer stops like normal periodic mode; the camera keeps looking.
 - Option **Ring alarm + stop timer** / **Only stop timer** (no sound). The alarm stops with Pause / Resume / Stop, or when a later check sees open eyes.
-- Opening the eyes for ~1.2 s breaks the streak (the 5 minutes start over); single noisy frames are ignored.
-  Eyes that cannot be measured (sunglasses, head turned far) never trigger the alarm.
-- Replaces Aggressive mode and Blink verification while ON. Limits: `AppSettings.EYE_CLOSED_LIMIT_MS`, thresholds in `EyeState` (Engine.kt), streak logic in `EyeClosedTracker` (Detector.kt).
+- Replaces Aggressive mode and Blink verification while ON. Limit: `AppSettings.EYE_CLOSED_LIMIT_MS`, thresholds in `EyeState` (Engine.kt), open-eye logic in `EyeClosedTracker` (Detector.kt).
 
 ## New in 1.7.0 - remote pause / start (PC console + SMS)
 - **From the PC console (PC camera mode):** PresenceCam 2.1 shows your main countdown live in big digits and you press

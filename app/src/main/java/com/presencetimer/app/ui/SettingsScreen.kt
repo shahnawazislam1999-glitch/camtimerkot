@@ -94,12 +94,13 @@ fun SettingsScreen(settings: AppSettings, live: LiveState, onBack: () -> Unit) {
                 SectionTitle("Eye-closed detection")
                 ToggleRow(
                     "😴 Eye-closed detection",
-                    "Every interval (default 5 min) the camera wakes up and looks at your eyes. The main countdown " +
+                    "Every interval (default 5 min) the camera wakes up and watches your eyes for up to 2 minutes. The main countdown " +
                         "keeps running during the check (it never pauses while looking).\n" +
-                        "Eyes seen OPEN -> all fine, camera sleeps until the next interval.\n" +
-                        "Eyes CLOSED for 5 minutes in a row without a break -> the main countdown STOPS, the alarm " +
-                        "rings (if the option below is on) and the camera switches off.\n" +
-                        "If you open your eyes for a moment the 5 minutes start over. Pause / Resume / Stop silence the alarm.\n" +
+                        "You must be AWAKE: the camera has to see your eyes OPEN. Seen open -> all fine, camera sleeps until the next interval.\n" +
+                        "No open eyes for 2 minutes in a row (eyes closed, eyes not visible, face hidden, or only your " +
+                        "body / head detected) -> the main countdown STOPS, the alarm rings (if the option below is on) " +
+                        "and the camera switches off.\n" +
+                        "Nobody on camera at all -> timer stops like normal periodic mode. Pause / Resume / Stop silence the alarm.\n" +
                         "Uses the interval of Periodic detection; replaces Aggressive mode and Blink verification while ON.",
                     settings.eyeClosedDetect,
                     extra = if (settings.eyeClosedDetect) live.detectionText else null
@@ -113,7 +114,7 @@ fun SettingsScreen(settings: AppSettings, live: LiveState, onBack: () -> Unit) {
                     }
                 }
                 if (settings.eyeClosedDetect) {
-                    Text("When eyes stay closed for 5 minutes", fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                    Text("When no open eyes are seen for 2 minutes", fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
                         modifier = Modifier.padding(top = 8.dp))
                     Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Chip("🔔 Ring alarm + stop timer", settings.eyeClosedAlarm, Modifier.weight(1f)) {

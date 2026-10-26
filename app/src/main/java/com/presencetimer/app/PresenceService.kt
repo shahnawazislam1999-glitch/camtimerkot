@@ -357,7 +357,7 @@ class PresenceService : LifecycleService() {
         checkStart = System.currentTimeMillis(); checkFirstFrame = 0L
         Engine.startDetection(periodic)
         if (aggOn()) { verifier.begin(true); Engine.setStatusText("🔍 Checking for a human (up to 5 min)…") }
-        if (eyeOn()) Engine.setStatusText("👁 Watching eyes — timer keeps running, alarm if closed 5 min in a row")
+        if (eyeOn()) Engine.setStatusText("👁 Watching eyes — timer keeps running, alarm if no open eyes for 2 min")
         acquireWakeLock()
         if (pcMode) startPcSource() else bindCamera()
 
@@ -827,7 +827,8 @@ class PresenceService : LifecycleService() {
     //
     // Every <interval> (e.g. 5 min) the camera wakes. The main countdown keeps running during the check.
     //   eyes seen OPEN (awake)                    -> check passed, camera sleeps until the next interval
-    //   eyes closed 5 min in a row, no break      -> countdown STOPS, alarm rings (if the alarm option is on),
+    //   no open eyes for 2 min in a row (closed, not visible, only body / head seen)
+    //                                             -> countdown STOPS, alarm rings (if the alarm option is on),
     //                                                camera goes to sleep
     //   nobody in the picture                     -> same as normal periodic mode (timer stops, camera keeps looking)
     // The alarm stops with Pause / Resume / Stop, or when a later check sees the eyes open.
@@ -839,12 +840,21 @@ class PresenceService : LifecycleService() {
 
     private fun eyeReset() { eyeTracker.reset(); eyeHumanSeen = false }
 
+    /** Start of the current eye watch (first picture of this check). */
+    private fun eyeWatchStart(): Long = if (checkFirstFrame != 0L) checkFirstFrame else checkStart
+
     /** Returns true when this call ended the check (pass or fail). Main thread. */
     private fun eyeEvaluate(now: Long): Boolean {
         if (!periodic || !checking || holding) return false
         val snap = eyeTracker.snapshot(now)
-        if (snap.closedMs >= AppSettings.EYE_CLOSED_LIMIT_MS) { eyeFail(now); return true }
-        if (snap.passed && Engine.isPresent() && Engine.humanNow(now)) { finishCheck(true, now); return true }
+        // Awake: eyes were seen OPEN -> pass, camera sleeps until the next interval.
+        if (snap.passed && Engine.isPresent()) { finishCheck(true, now); return true }
+        // A person (face OR only body) is there, but NO open eyes were seen for 2 min in a row
+        // (eyes closed, eyes not visible, face hidden, only body detected) -> stop.
+        val seen = eyeHumanSeen || snap.faceSeen
+        if (seen && checkFirstFrame != 0L && now - eyeWatchStart() >= AppSettings.EYE_CLOSED_LIMIT_MS) {
+            eyeFail(now); return true
+        }
         return false
     }
 
@@ -852,31 +862,26 @@ class PresenceService : LifecycleService() {
     private fun eyeWatchTick(now: Long) {
         if (eyeEvaluate(now)) return
         val snap = eyeTracker.snapshot(now)
-        if (snap.closedMs > 0L) {
-            Engine.setStatusText("👁 Eyes closed ${Fmt.time(snap.closedMs)} / ${Fmt.time(AppSettings.EYE_CLOSED_LIMIT_MS)} • countdown keeps running",
-                if (Engine.isPresent()) StatusKind.RUNNING else StatusKind.IDLE)
-            return
-        }
         val seen = eyeHumanSeen || snap.faceSeen
         when {
             checkFirstFrame == 0L && now - checkStart >= NO_FRAME_TIMEOUT_MS ->
                 finishCheck(false, now, "⚠️ No camera picture — timer paused, will retry")
             !seen && checkFirstFrame != 0L && now - checkFirstFrame >= CHECK_WINDOW_MS ->
                 finishCheck(false, now)                         // nobody there: like normal periodic mode
-            now - checkStart >= AppSettings.EYE_CHECK_WINDOW_MS ->
-                finishCheck(seen, now)                          // a person is there but eyes were never shown closed 5 min
-            else -> if (checkFirstFrame != 0L) Engine.setStatusText(
-                if (seen) "👁 Watching eyes • countdown keeps running" else "🔍 Looking for a person…",
+            seen -> Engine.setStatusText(
+                "👁 Waiting to see open eyes ${Fmt.time(now - eyeWatchStart())} / ${Fmt.time(AppSettings.EYE_CLOSED_LIMIT_MS)} • countdown keeps running",
+                if (Engine.isPresent()) StatusKind.RUNNING else StatusKind.IDLE)
+            checkFirstFrame != 0L -> Engine.setStatusText("🔍 Looking for a person…",
                 if (Engine.isPresent()) StatusKind.RUNNING else StatusKind.IDLE)
         }
     }
 
-    /** Eyes were closed for 5 min in a row: countdown stops, alarm (optional), camera off. */
+    /** No open eyes for 2 min in a row: countdown stops, alarm (optional), camera off. */
     private fun eyeFail(now: Long) {
         val alarmOn = Store.settingsFlow.value.eyeClosedAlarm
         eyeAlarmArmed = alarmOn
-        Engine.checkFoundNobody(now, if (alarmOn) "😴 Eyes closed for 5 min — alarm ringing, timer stopped, camera off"
-                                     else "😴 Eyes closed for 5 min — timer stopped, camera off")
+        Engine.checkFoundNobody(now, if (alarmOn) "😴 No open eyes for 2 min — alarm ringing, timer stopped, camera off"
+                                     else "😴 No open eyes for 2 min — timer stopped, camera off")
         enterSleep(now, 0L)             // camera off (the alarm, if any, keeps ringing while it sleeps)
         evaluateAlarm()
     }
@@ -889,7 +894,7 @@ class PresenceService : LifecycleService() {
         val s = Store.settingsFlow.value
         val now = System.currentTimeMillis()
 
-        // Eyes closed 5 min in a row: rings until Pause / Resume / Stop or until a later check sees open eyes.
+        // No open eyes for 2 min in a row: rings until Pause / Resume / Stop or until a later check sees open eyes.
         if (eyeAlarmArmed && s.eyeClosedDetect && s.eyeClosedAlarm) { setAlarm(AlarmReason.EYES_CLOSED); return }
 
         if (s.delayedAlarmEnabled && !s.aggressiveMode) { evaluateDelayedAlarm(s, now); return }
@@ -961,7 +966,7 @@ class PresenceService : LifecycleService() {
                 AlarmReason.DETECTED -> "🚨 ALARM PLAYING • Human detected"
                 AlarmReason.MISSING -> "🚨 ALARM PLAYING • Person missing"
                 AlarmReason.LINK_LOST -> "🚨 ALARM PLAYING • PC camera disconnected"
-                AlarmReason.EYES_CLOSED -> "🚨 ALARM PLAYING • Eyes closed for 5 min"
+                AlarmReason.EYES_CLOSED -> "🚨 ALARM PLAYING • No open eyes for 2 min"
                 null -> null
             }
         )
