@@ -177,6 +177,7 @@ class PresenceService : LifecycleService() {
     // ---- eye-closed mode ----
     private val eyeTracker = EyeClosedTracker()
     private var eyeAlarmArmed = false           // eyes were closed 5 min in a row: alarm rings until the user acts / eyes are seen open
+    private var eyeStopped = false                // eye check failed: camera stays OFF for good until Resume / Pause / Stop
     @Volatile private var eyeHumanSeen = false            // a human was in the picture at some point of this check
 
     private val camStateObserver = Observer<CameraState> { state ->
@@ -274,7 +275,7 @@ class PresenceService : LifecycleService() {
         noHumanSince = 0L
         idleSince = 0L; idleCycle = false
         aggAlarmArmed = false
-        eyeAlarmArmed = false
+        eyeAlarmArmed = false; eyeStopped = false
         if (periodic && !Engine.isPresent()) {
             val now = System.currentTimeMillis()
             if (sleeping) beginCheck(now)
@@ -293,7 +294,7 @@ class PresenceService : LifecycleService() {
     private fun pauseNow() {
         if (!running) return
         Engine.setPaused(true)
-        verifier.end(); aggAlarmArmed = false; eyeAlarmArmed = false
+        verifier.end(); aggAlarmArmed = false; eyeAlarmArmed = false; eyeStopped = false
         if (!(periodic && sleeping)) sleepSource()      // already off while periodic-sleeping
         cameraOffByPause = true
         analyzerIdle()
@@ -348,7 +349,7 @@ class PresenceService : LifecycleService() {
         startedAt = System.currentTimeMillis()
         periodic = Store.settingsFlow.value.periodicEnabled || Store.settingsFlow.value.aggressiveMode ||
             Store.settingsFlow.value.eyeClosedDetect
-        aggAlarmArmed = false; eyeAlarmArmed = false; eyeReset()
+        aggAlarmArmed = false; eyeAlarmArmed = false; eyeStopped = false; eyeReset()
         sleeping = false; holding = false
         idleCycle = false; autoPeriodic = false; holdStart = 0L; idleSince = 0L
         cameraOffByPause = false
@@ -437,7 +438,7 @@ class PresenceService : LifecycleService() {
         periodic = false; sleeping = false; checking = false; holding = false
         idleCycle = false; autoPeriodic = false; idleSince = 0L
         cameraOffByPause = false
-        aggAlarmArmed = false; eyeAlarmArmed = false
+        aggAlarmArmed = false; eyeAlarmArmed = false; eyeStopped = false
         verifier.end()
         tickJob?.cancel()
         Engine.stopDetection()
@@ -579,7 +580,7 @@ class PresenceService : LifecycleService() {
             // Aggressive mode switched off while running: forget its state, delete temporary photos.
             aggAlarmArmed = false; verifier.end()
         }
-        if (!s.eyeClosedDetect && eyeAlarmArmed) { eyeAlarmArmed = false; eyeReset() }   // eye mode switched off while running
+        if (!s.eyeClosedDetect && (eyeAlarmArmed || eyeStopped)) { eyeAlarmArmed = false; eyeStopped = false; eyeReset() }   // eye mode switched off while running
         if (want == periodic) {
             if (want && s.aggressiveMode && checking && !verifier.isActive() && !sleeping) verifier.begin(true)
             return
@@ -653,7 +654,7 @@ class PresenceService : LifecycleService() {
         if (!up && !linkDown) {
             linkDown = true
             Engine.linkLost(now)
-            if (periodic && !cameraOffByPause) {
+            if (periodic && !cameraOffByPause && !eyeStopped) {
                 // Don't sleep between checks while the PC is unreachable: keep looking continuously.
                 PcLink.streamEnabled = true
                 sleeping = false; checking = true; holding = true
@@ -771,6 +772,7 @@ class PresenceService : LifecycleService() {
             if (noPicture) finishCheck(false, now, "⚠️ No camera picture — timer paused, will retry")
             else if (windowOver) finishCheck(false, now)
         } else if (sleeping) {
+            if (eyeStopped) { Engine.setCheckState(false, true, 0L); return }   // eye check failed: no more automatic checks
             val next = nextCheckAt()
             Engine.setCheckState(false, true, next)
             if (now >= next) beginCheck(now)
@@ -880,9 +882,11 @@ class PresenceService : LifecycleService() {
     private fun eyeFail(now: Long) {
         val alarmOn = Store.settingsFlow.value.eyeClosedAlarm
         eyeAlarmArmed = alarmOn
-        Engine.checkFoundNobody(now, if (alarmOn) "😴 No open eyes for 2 min — alarm ringing, timer stopped, camera off"
-                                     else "😴 No open eyes for 2 min — timer stopped, camera off")
+        Engine.checkFoundNobody(now, if (alarmOn) "😴 No open eyes for 2 min — alarm ringing, timer stopped, camera off for good"
+                                     else "😴 No open eyes for 2 min — timer stopped, camera off for good (press Resume)")
         enterSleep(now, 0L)             // camera off (the alarm, if any, keeps ringing while it sleeps)
+        eyeStopped = true               // permanent: no automatic wake-up until Resume / Pause / Stop
+        Engine.setCheckState(false, true, 0L)
         evaluateAlarm()
     }
 
@@ -1002,7 +1006,8 @@ class PresenceService : LifecycleService() {
         val text = when {
             live.detecting && live.paused -> "⏸ Paused — timer frozen • tap Resume"
             live.detecting && live.periodic && live.sleeping ->
-                (if (live.present) "🟢 Timer running" else "🔴 Timer stopped") + " • camera asleep • next check in $nextIn"
+                (if (live.present) "🟢 Timer running" else "🔴 Timer stopped") +
+                    (if (live.nextCheckAtMs > 0) " • camera asleep • next check in $nextIn" else " • camera off • tap Resume to start")
             live.detecting && live.periodic && live.checking && !live.present -> "🔍 Checking camera…"
             pcMode && live.detecting && !PcLink.framesFlowing(now) -> "🟠 PC camera not connected — timer paused"
             live.detecting && live.present -> "🟢 Human detected — timer running"

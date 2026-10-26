@@ -746,6 +746,7 @@ internal fun PeriodicCard(settings: AppSettings, live: LiveState) {
             if (live.detecting && live.periodic) {
                 val line = when {
                     live.checking -> "🔍 Checking the camera now…"
+                    live.sleeping && live.nextCheckAtMs <= 0L -> "😴 Camera off • press Resume to start again"
                     live.sleeping -> "😴 Camera asleep • next check in ${Fmt.time(maxOf(0L, live.nextCheckAtMs - now))}"
                     else -> null
                 }

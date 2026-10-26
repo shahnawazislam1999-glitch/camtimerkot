@@ -99,7 +99,7 @@ fun SettingsScreen(settings: AppSettings, live: LiveState, onBack: () -> Unit) {
                         "You must be AWAKE: the camera has to see your eyes OPEN. Seen open -> all fine, camera sleeps until the next interval.\n" +
                         "No open eyes for 2 minutes in a row (eyes closed, eyes not visible, face hidden, or only your " +
                         "body / head detected) -> the main countdown STOPS, the alarm rings (if the option below is on) " +
-                        "and the camera switches off.\n" +
+                        "and the camera switches OFF FOR GOOD: it does not wake up again by itself. Press Resume to start again.\n" +
                         "Nobody on camera at all -> timer stops like normal periodic mode. Pause / Resume / Stop silence the alarm.\n" +
                         "Uses the interval of Periodic detection; replaces Aggressive mode and Blink verification while ON.",
                     settings.eyeClosedDetect,
@@ -125,8 +125,8 @@ fun SettingsScreen(settings: AppSettings, live: LiveState, onBack: () -> Unit) {
                         }
                     }
                     Text(if (settings.eyeClosedAlarm)
-                        "The alarm rings until you press Pause / Resume / Stop, or until a later check sees your eyes open."
-                    else "No sound: the countdown just stops and the camera goes to sleep. A later check that sees your eyes open starts it again.",
+                        "The alarm rings until you press Pause / Resume / Stop. The camera stays off until you press Resume."
+                    else "No sound: the countdown just stops and the camera stays off until you press Resume.",
                         color = Muted, fontSize = 11.5.sp, modifier = Modifier.padding(top = 6.dp))
                 }
             }

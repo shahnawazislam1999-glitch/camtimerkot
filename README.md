@@ -17,9 +17,9 @@ Detection is fully offline: ML Kit face detection and pose detection (body) ship
 - Settings -> **Eye-closed detection** (toggle). Uses the interval of *Check for a human only every…* (default 5 min).
 - When the interval is due the camera **wakes** and checks continuously. The **main countdown keeps running** during the check.
 - Eyes seen **open** (~1.2 s) -> awake, check passed, camera sleeps until the next interval.
-- **No open eyes for 2 minutes in a row** (eyes closed, eyes not visible, face hidden, or only the body / head detected) -> **countdown stops, camera goes off** and (option) the **alarm rings**.
+- **No open eyes for 2 minutes in a row** (eyes closed, eyes not visible, face hidden, or only the body / head detected) -> **countdown stops, camera goes off for good** (no more automatic checks) and (option) the **alarm rings**.
 - Nobody on camera at all -> timer stops like normal periodic mode; the camera keeps looking.
-- Option **Ring alarm + stop timer** / **Only stop timer** (no sound). The alarm stops with Pause / Resume / Stop, or when a later check sees open eyes.
+- Option **Ring alarm + stop timer** / **Only stop timer** (no sound). The alarm stops with Pause / Resume / Stop; Resume also starts a new check.
 - Replaces Aggressive mode and Blink verification while ON. Limit: `AppSettings.EYE_CLOSED_LIMIT_MS`, thresholds in `EyeState` (Engine.kt), open-eye logic in `EyeClosedTracker` (Detector.kt).
 
 ## New in 1.7.0 - remote pause / start (PC console + SMS)
