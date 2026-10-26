@@ -13,6 +13,17 @@ saved records, alarms and backup/restore. Adds what a web page cannot do:
 
 Detection is fully offline: ML Kit face detection and pose detection (body) ship inside the APK.
 
+## New in 1.7.0 - remote pause / start (PC console + SMS)
+- **From the PC console (PC camera mode):** PresenceCam 2.1 shows your main countdown live in big digits and you press
+  **`1` = pause**, **`2` = start** (one key, no Enter). The phone sends its timer state to the PC every second and obeys only
+  commands signed with the pairing secret. Pause also switches the camera / PC webcam off, like the notification Pause button.
+- **By SMS (any camera mode):** Settings -> *Control by SMS*. Enter **your own number** and a **secret PIN (4-8 digits)**, turn it on and tap *Allow SMS*.
+  Then text the phone from that number: `PAUSE 1234`, `START 1234`, `STATUS 1234` (1234 = your PIN; `stop` = pause, `resume`/`play` = start).
+  The phone can text back the result (optional, may cost carrier SMS fees).
+  Messages from other numbers or without the PIN are ignored silently; 5 wrong-PIN tries lock SMS control for 10 minutes.
+  The timer must already be running (Android does not let an app start the camera from the background), so SMS can pause / resume / report, not start the app.
+- SMS permissions are for sideloaded use (not Google Play). Some phones stop apps that were force-closed from receiving SMS: open the app once after a reboot / force-stop.
+
 ## New in 1.6.0 (v22)
 - **Auto reset is now daily at 12 AM** (local midnight) instead of every 24 hours. Same toggle in Settings -> Auto reset; the unsaved time is saved as a record first, daily history untouched.
 - **Study time history** now sits right below the main countdown (no scrolling).

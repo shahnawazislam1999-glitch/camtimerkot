@@ -69,6 +69,20 @@ data class PcPairing(
     val port: Int
 )
 
+/**
+ * Remote control by SMS. Kept outside the backup-compatible settings JSON (it holds a secret PIN).
+ * A message is only obeyed when it comes from [number] AND contains [pin].
+ */
+data class SmsConfig(
+    val enabled: Boolean = false,
+    val number: String = "",
+    val pin: String = "",
+    val reply: Boolean = true
+) {
+    val ready: Boolean
+        get() = enabled && number.count { it.isDigit() } >= 7 && pin.length in 4..8 && pin.all { it.isDigit() }
+}
+
 data class Stats(
     val todayMs: Long,
     val monthMs: Long,
@@ -99,6 +113,9 @@ object Store {
 
     /** Paired PC (null = not paired). Kept outside the backup-compatible settings JSON. */
     val pairingFlow = MutableStateFlow<PcPairing?>(null)
+
+    /** SMS remote control settings (see [SmsConfig]). */
+    val smsFlow = MutableStateFlow(SmsConfig())
 
     /** Bumped whenever stored data changes so the UI re-reads totals / lists. */
     val version = MutableStateFlow(0)
@@ -151,6 +168,7 @@ object Store {
                     .coerceIn(AppSettings.UNIT_SECONDS, AppSettings.UNIT_MINUTES)
             ).let { it.copy(periodicValue = AppSettings.clampValue(rawSettings.optInt("periodicValue", 10), it.periodicUnit)) }
             pairingFlow.value = readPairing()
+            smsFlow.value = readSms()
         }
     }
 
@@ -180,6 +198,28 @@ object Store {
             rawSettings.put("autoResetAnchorMs", s.autoResetAnchorMs)
             prefs.edit().putString(KEY_SETTINGS, rawSettings.toString()).apply()
             settingsFlow.update { s }
+        }
+    }
+
+    // ---------- SMS remote control ----------
+
+    private const val KEY_SMS = "smsControlV1"
+
+    private fun readSms(): SmsConfig = try {
+        val raw = prefs.getString(KEY_SMS, null)
+        if (raw == null) SmsConfig() else {
+            val o = JSONObject(raw)
+            SmsConfig(o.optBoolean("enabled", false), o.optString("number", ""),
+                o.optString("pin", ""), o.optBoolean("reply", true))
+        }
+    } catch (_: Exception) { SmsConfig() }
+
+    fun saveSms(c: SmsConfig) {
+        synchronized(lock) {
+            val o = JSONObject().put("enabled", c.enabled).put("number", c.number)
+                .put("pin", c.pin).put("reply", c.reply)
+            prefs.edit().putString(KEY_SMS, o.toString()).apply()
+            smsFlow.value = c
         }
     }
 

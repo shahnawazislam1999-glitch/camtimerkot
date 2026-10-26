@@ -1,6 +1,10 @@
 package com.presencetimer.app.ui
 
+import android.Manifest
+import android.content.pm.PackageManager
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -12,19 +16,29 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.presencetimer.app.AppSettings
 import com.presencetimer.app.Fmt
 import com.presencetimer.app.LiveState
+import com.presencetimer.app.SmsConfig
 import com.presencetimer.app.Store
 
 /** All camera related settings live here, so the main screen stays short. */
@@ -144,7 +158,94 @@ fun SettingsScreen(settings: AppSettings, live: LiveState, onBack: () -> Unit) {
             // Periodic detection
             PeriodicCard(settings, live)
 
+            // Pause / start by text message
+            SmsControlCard()
+
             Spacer(Modifier.height(16.dp))
         }
+    }
+}
+
+
+/** Pause / start the timer by SMS. Off by default; needs your own number AND a secret PIN. */
+@Composable
+private fun SmsControlCard() {
+    val ctx = LocalContext.current
+    val cfg by Store.smsFlow.collectAsStateWithLifecycle()
+    var number by remember(cfg.number) { mutableStateOf(cfg.number) }
+    var pin by remember(cfg.pin) { mutableStateOf(cfg.pin) }
+    var permTick by remember { mutableIntStateOf(0) }
+    var note by remember { mutableStateOf<String?>(null) }
+
+    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permTick++ }
+    fun has(p: String) = ContextCompat.checkSelfPermission(ctx, p) == PackageManager.PERMISSION_GRANTED
+    val canReceive = permTick >= 0 && has(Manifest.permission.RECEIVE_SMS)
+    val canSend = permTick >= 0 && has(Manifest.permission.SEND_SMS)
+
+    fun save(enabled: Boolean = cfg.enabled, reply: Boolean = cfg.reply) {
+        val n = number.trim()
+        val p = pin.trim()
+        when {
+            n.count { it.isDigit() } < 7 -> { note = "Type the phone number you will send the SMS from (with country code)."; return }
+            p.length !in 4..8 || !p.all { it.isDigit() } -> { note = "PIN must be 4 to 8 digits."; return }
+        }
+        Store.saveSms(SmsConfig(enabled = enabled, number = n, pin = p, reply = reply))
+        note = "Saved ✓"
+    }
+
+    Card {
+        SectionTitle("Control by SMS")
+        ToggleRow(
+            "📩 Pause / start the timer by text message",
+            "Send an SMS to this phone from YOUR number:  PAUSE 1234  ·  START 1234  ·  STATUS 1234  " +
+                "(1234 = your PIN). Messages from other numbers, or without the PIN, are ignored silently. " +
+                "5 wrong-PIN tries lock it for 10 minutes. The timer must already be running (started in the app).",
+            cfg.enabled,
+            extra = when {
+                !cfg.enabled -> null
+                !cfg.ready -> "Fill in your number and PIN below, then press Save."
+                !canReceive -> "SMS permission missing — press “Allow SMS” below."
+                else -> "✓ Active — only ${cfg.number} with the PIN can control the timer."
+            },
+            extraColor = if (cfg.enabled && cfg.ready && canReceive) Green else Muted
+        ) { v ->
+            if (!v) Store.saveSms(cfg.copy(enabled = false)) else save(enabled = true)
+        }
+
+        OutlinedTextField(
+            value = number,
+            onValueChange = { v -> number = v.filter { ch -> ch.isDigit() || ch == '+' || ch == ' ' }.take(20) },
+            singleLine = true,
+            label = { Text("Your phone number (the one you text from)") },
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone)
+        )
+        OutlinedTextField(
+            value = pin,
+            onValueChange = { v -> pin = v.filter { ch -> ch.isDigit() }.take(8) },
+            singleLine = true,
+            label = { Text("Secret PIN (4–8 digits)") },
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword)
+        )
+
+        ToggleRow(
+            "Reply with an SMS",
+            "The phone texts back “Paused at 01:23:45…”. Your carrier may charge for these replies.",
+            cfg.reply
+        ) { v -> if (cfg.ready || (number.isNotBlank() && pin.isNotBlank())) save(reply = v) else Store.saveSms(cfg.copy(reply = v)) }
+
+        Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Btn("Save", modifier = Modifier.weight(1f)) { save() }
+            if (!canReceive || (cfg.reply && !canSend)) {
+                Btn("Allow SMS", modifier = Modifier.weight(1f)) {
+                    launcher.launch(arrayOf(Manifest.permission.RECEIVE_SMS, Manifest.permission.SEND_SMS))
+                }
+            }
+        }
+        if (note != null) Text(note!!, color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
+        Text("Anyone who can fake your number AND guess the PIN could pause your timer, so keep the PIN private. " +
+            "Pause is the only thing SMS can do besides start and status: it can never stop the app or read your data.",
+            color = Muted, fontSize = 11.5.sp, modifier = Modifier.padding(top = 6.dp))
     }
 }

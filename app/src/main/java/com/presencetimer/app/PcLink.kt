@@ -74,6 +74,35 @@ object PcLink {
     @Volatile var streamEnabled = true
     @Volatile var frameListener: ((ByteArray) -> Unit)? = null
 
+    /**
+     * Remote control from the PC console ("pause" / "resume"). Only called for commands that carry a valid
+     * signature of the paired secret (see PcClient.handleCommand). Set by the service while it is running.
+     */
+    @Volatile var commandListener: ((String) -> Unit)? = null
+
+    /** Short code of the timer state shown on the PC: idle / paused / running / waiting. */
+    internal fun modeCode(): String {
+        val l = Engine.live.value
+        return when {
+            !l.detecting -> "idle"
+            l.paused -> "paused"
+            l.present -> "running"
+            else -> "waiting"
+        }
+    }
+
+    /** Timer snapshot sent to the PC about once a second (plain ASCII codes, no emoji). */
+    internal fun stateJson(now: Long): String {
+        val l = Engine.live.value
+        return JSONObject()
+            .put("mode", modeCode())
+            .put("ms", Engine.displayMs(now))
+            .put("today", Store.todayMs(now))
+            .put("asleep", l.detecting && l.periodic && l.sleeping)
+            .put("checking", l.detecting && l.periodic && l.checking)
+            .toString()
+    }
+
     private val lock = Any()
     private val owners = HashSet<String>()
     private var client: PcClient? = null
@@ -133,6 +162,7 @@ object PcLink {
 
     internal fun setStatus(s: LinkStatus) { _status.value = s }
     internal fun publishPreview(b: Bitmap) { _preview.value = b }
+    internal fun onCommand(cmd: String) { commandListener?.invoke(cmd) }
     internal fun onFrame(bytes: ByteArray) {
         lastFrameAt = System.currentTimeMillis()
         frameListener?.invoke(bytes)
@@ -157,6 +187,8 @@ private const val T_PONG = 7
 private const val T_STATUS = 8
 private const val T_START = 10
 private const val T_STOP = 11
+private const val T_STATE = 12     // phone -> PC: timer state
+private const val T_CMD = 13       // PC -> phone: signed remote command
 
 private const val R_FAILED = 0
 private const val R_ENDED = 1
@@ -518,14 +550,15 @@ private class PcClient(private val ctx: Context) {
             val pcName = cj.optString("name", t.name).ifEmpty { t.name }
 
             val devId = Store.deviceId()
+            var sessionKey: ByteArray
             val code = pairCode
             val paired = Store.pairingFlow.value
             val mode: String
             val key: ByteArray
             if (code != null) {
-                mode = "pair"; key = code.toByteArray(Charsets.UTF_8)
+                mode = "pair"; key = code.toByteArray(Charsets.UTF_8); sessionKey = key
             } else if (paired != null && paired.pcId == pcId) {
-                mode = "auth"; key = hexToBytes(paired.secretHex)
+                mode = "auth"; key = hexToBytes(paired.secretHex); sessionKey = key
             } else {
                 return R_FAILED   // some other PC
             }
@@ -555,6 +588,7 @@ private class PcClient(private val ctx: Context) {
                 val enc = hexToBytes(JSONObject(String(res.payload, Charsets.UTF_8)).getString("enc"))
                 val mask = hmac(key, "secret$nonce")
                 val secret = ByteArray(32) { i -> (enc[i].toInt() xor mask[i].toInt()).toByte() }
+                sessionKey = secret
                 Store.savePairing(PcPairing(pcId, pcName, hex(secret), t.ip, t.port))
                 pairCode = null
                 PcLink.pairingFinished("Paired with $pcName ✓")
@@ -567,9 +601,13 @@ private class PcClient(private val ctx: Context) {
             // Heartbeat + "start video" (sent as soon as detection is running).
             val startSent = AtomicBoolean(false)
             val lastRx = AtomicLong(SystemClock.elapsedRealtime())
+            val lastCmdCounter = AtomicLong(0L)
+            val sessionSecret = sessionKey
             val sock: Socket = s!!
             thread(name = "pc-ping", isDaemon = true) {
                 var i = 0
+                var lastMode = ""
+                var lastStateAt = 0L
                 try {
                     while (alive.get() && !stopped) {
                         Thread.sleep(500)
@@ -580,6 +618,13 @@ private class PcClient(private val ctx: Context) {
                             startSent.set(want)
                         }
                         if (++i % 2 == 0) send(out, T_PING, ByteArray(0))
+                        // Timer state for the PC console: at once when it changes, otherwise every second.
+                        val nowR = SystemClock.elapsedRealtime()
+                        val modeNow = PcLink.modeCode()
+                        if (modeNow != lastMode || nowR - lastStateAt >= 1000) {
+                            lastMode = modeNow; lastStateAt = nowR
+                            send(out, T_STATE, PcLink.stateJson(System.currentTimeMillis()).toByteArray(Charsets.UTF_8))
+                        }
                         if (SystemClock.elapsedRealtime() - lastRx.get() > 3000) {
                             try { sock.close() } catch (_: Exception) { }
                         }
@@ -595,6 +640,7 @@ private class PcClient(private val ctx: Context) {
                 when (f.type) {
                     T_FRAME -> PcLink.onFrame(f.payload)
                     T_STATUS -> handleCameraStatus(f.payload, pcName, t.ip)
+                    T_CMD -> handleCommand(f.payload, nonce, sessionSecret, lastCmdCounter)
                 }
             }
             return R_ENDED
@@ -605,6 +651,25 @@ private class PcClient(private val ctx: Context) {
             try { s?.close() } catch (_: Exception) { }
             if (socket === s) socket = null
         }
+    }
+
+    /**
+     * Remote command from the PC. Accepted only with a valid HMAC over (session nonce, counter, command)
+     * made with the secret of this pairing, and only with a counter higher than the last one (no replay).
+     */
+    private fun handleCommand(payload: ByteArray, nonce: String, secret: ByteArray, lastCounter: AtomicLong) {
+        try {
+            val j = JSONObject(String(payload, Charsets.UTF_8))
+            val cmd = j.optString("cmd")
+            val counter = j.optLong("n", 0L)
+            val sig = j.optString("sig")
+            if (cmd != "pause" && cmd != "resume") return
+            if (counter <= lastCounter.get()) return
+            val good = hex(hmac(secret, "cmd|$nonce|$counter|$cmd"))
+            if (!java.security.MessageDigest.isEqual(good.toByteArray(Charsets.UTF_8), sig.toByteArray(Charsets.UTF_8))) return
+            lastCounter.set(counter)
+            PcLink.onCommand(cmd)
+        } catch (_: Exception) { }
     }
 
     private fun handleCameraStatus(payload: ByteArray, pcName: String, ip: String) {

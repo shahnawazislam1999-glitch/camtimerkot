@@ -86,6 +86,39 @@ class PresenceService : LifecycleService() {
             }
         }
 
+        /**
+         * Remote control entry point (SMS, PC console). Safe to call from any thread.
+         * [cmd] is "pause", "resume" or "status". Returns a one-line reply for the sender.
+         */
+        fun remote(cmd: String): String {
+            val svc = instance
+            if (svc == null || !svc.running) {
+                return "Timer is not running. Open Presence Timer and press Start."
+            }
+            val now = System.currentTimeMillis()
+            val total = Fmt.time(Engine.displayMs(now))
+            val today = Fmt.time(Store.todayMs(now))
+            when (cmd) {
+                "pause" -> {
+                    if (Engine.isPaused()) return "Already paused at $total (today $today)."
+                    svc.mainHandler.post { svc.applyRemote("pause") }
+                    return "Paused at $total (today $today). Send START to continue."
+                }
+                "resume" -> {
+                    if (!Engine.isPaused() && Engine.isPresent()) return "Already running: $total (today $today)."
+                    svc.mainHandler.post { svc.applyRemote("resume") }
+                    return "Started. Timer $total (today $today)."
+                }
+            }
+            val state = when (PcLink.modeCode()) {
+                "paused" -> "PAUSED"
+                "running" -> "RUNNING"
+                "waiting" -> "NO HUMAN SEEN (stopped)"
+                else -> "IDLE"
+            }
+            return "Timer $state $total, today $today."
+        }
+
         /** Called from the UI (main thread) to show / hide the camera preview. */
         fun setPreviewProvider(provider: Preview.SurfaceProvider?) {
             pendingProvider = provider
@@ -204,6 +237,15 @@ class PresenceService : LifecycleService() {
         // STICKY: if the system kills the process, it recreates the service (null intent -> startDetection()).
         // A deliberate Stop calls stopSelf(), which is never restarted.
         return START_STICKY
+    }
+
+    /** Runs on the main thread: executes a remote "pause" / "resume" (PC console or SMS). */
+    private fun applyRemote(cmd: String) {
+        if (!running) return
+        when (cmd) {
+            "pause" -> if (!Engine.isPaused()) pauseNow()
+            "resume" -> startNow()
+        }
     }
 
     /**
@@ -343,11 +385,14 @@ class PresenceService : LifecycleService() {
         frameBusy.set(false)
         PcLink.streamEnabled = true
         PcLink.frameListener = { bytes -> onPcFrame(bytes) }
+        // Pause / start typed on the PC console (already verified by the link layer).
+        PcLink.commandListener = { cmd -> mainHandler.post { applyRemote(cmd) } }
         PcLink.acquire(this, "service")
     }
 
     private fun stopPcSource() {
         PcLink.frameListener = null
+        PcLink.commandListener = null
         PcLink.release("service")
     }
 
