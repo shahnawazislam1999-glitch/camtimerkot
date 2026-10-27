@@ -30,7 +30,6 @@ class PresenceAnalyzer(
 
     @Volatile var mirror = true
     private var lastProcessed = 0L
-    private var lastPoseAt = 0L
 
     private val faceDetector = FaceDetection.getClient(
         FaceDetectorOptions.Builder()
@@ -47,10 +46,6 @@ class PresenceAnalyzer(
 
     companion object {
         const val DETECTION_INTERVAL_MS = 200L
-        /** Eye-closed mode counts blinks (100-300 ms long), so it needs the fastest frame rate (~12 fps). */
-        const val EYE_INTERVAL_MS = 80L
-        /** Eye-closed mode: the (slow) body model only runs this often, so the frame rate stays high. */
-        const val EYE_POSE_EVERY_MS = 800L
         const val BODY_LANDMARK_MIN = 0.6f        // per-landmark in-frame likelihood
         const val BODY_MIN_LANDMARKS = 8          // landmarks needed to call it a body
         const val SHOULDER_MIN = 0.5f
@@ -62,7 +57,8 @@ class PresenceAnalyzer(
         val st = Store.settingsFlow.value
         val interval = when {
             st.aggressiveMode && verifier.isActive() -> HumanVerifier.FRAME_INTERVAL_MS
-            st.eyeClosedDetect -> EYE_INTERVAL_MS
+            // ~80 % of the frame period, so camera jitter never makes it skip every other frame
+            st.eyeClosedDetect -> maxOf(8L, 800L / st.eyeFps.coerceIn(10, 60))
             else -> DETECTION_INTERVAL_MS
         }
         if (now - lastProcessed < interval) { proxy.close(); return }
@@ -116,17 +112,19 @@ class PresenceAnalyzer(
             EyeState.classify(main.first.leftEyeOpenProbability, main.first.rightEyeOpenProbability,
                 main.first.headEulerAngleY)
         else EyeState.NONE
+        val eyeProb = if (main != null)
+            EyeState.openness(main.first.leftEyeOpenProbability, main.first.rightEyeOpenProbability,
+                main.first.headEulerAngleY)
+        else -1f
 
         var bodyDetected = false
         var bodyConf = 0f
         var bodyBox: NBox? = null
         var poseObs: PoseObs? = null
         var bodyRect: FloatArray? = null
-        // Eye-closed mode runs the (expensive) body model only now and then to keep a high frame rate for blinks.
+        // Eye-closed mode looks at the eyes ONLY: the (expensive) body model is not used, which keeps the frame rate high.
         // Aggressive mode always needs the body model (head / hand / body movement).
-        val poseNow = SystemClock.elapsedRealtime()
-        val runPose = !eyeMode || poseNow - lastPoseAt >= EYE_POSE_EVERY_MS
-        if (runPose) lastPoseAt = poseNow
+        val runPose = !eyeMode
         if (runPose) try {
             val pose = Tasks.await(poseDetector.process(image))
             poseObs = toPoseObs(pose)
@@ -163,7 +161,7 @@ class PresenceAnalyzer(
                 verifier.observe(SystemClock.elapsedRealtime(), fo, poseObs, roi, bmp)
             } else verifier.verdict()
         }
-        return FrameResult(hits, bodyDetected, bodyConf, bodyBox, verdict, eye)
+        return FrameResult(hits, bodyDetected, bodyConf, bodyBox, verdict, eye, eyeProb)
     }
 
     private fun faceObs(f: Face, strong: Boolean, w: Int, h: Int): FaceObs {
@@ -300,65 +298,65 @@ data class EyeSnapshot(
 
 /**
  * Counts real eye blinks of one person (eye-closed mode). A person who keeps their eyes closed makes no blinks,
- * so "too few blinks in 2 minutes" = eyes closed. Noise-proof by design:
- *  - a blink only counts if the eyes were OPEN for at least [ARM_OPEN_MS] before closing (so flickering
- *    probabilities of closed eyes cannot fake blinks),
- *  - the closure must be short ([MAX_CLOSED_MS]); a longer closure is eyes shut, not a blink,
- *  - the eyes must be seen open again for [REOPEN_CONFIRM_MS] after it,
+ * so "too few blinks in 2 minutes" = eyes closed.
+ *
+ * Built to catch very FAST blinks: a single frame that shows the eyes dipping below [CLOSE_MAX] between two
+ * open frames is already one blink - no minimum closing time and no waiting after the eyes reopen.
+ * Still noise-proof:
+ *  - the eyes must have been open ([OPEN_MIN]) for at least [ARM_OPEN_MS] before the dip, so the flicker of
+ *    permanently closed eyes cannot fake blinks,
+ *  - a closure longer than [MAX_CLOSED_MS] is eyes shut, not a blink,
  *  - face lost / eyes not measurable (head turned, sunglasses) cancels the blink in progress.
- * Eyes that are never measurable therefore never produce blinks.
+ * The only limit is physics: a blink shorter than one camera frame can fall between two frames - a higher
+ * frame rate (30 / 60 fps) makes that rarer.
  */
 class EyeBlinkCounter {
     companion object {
-        const val ARM_OPEN_MS = 250L
-        const val REOPEN_CONFIRM_MS = 100L
+        const val OPEN_MIN = 0.60f
+        const val CLOSE_MAX = 0.50f      // lenient: a camera frame mid-blink often only shows a partial dip
+        const val ARM_OPEN_MS = 50L
         const val MAX_CLOSED_MS = 1_000L
-        const val MAX_GAP_MS = 600L      // no frame for this long (camera hiccup) -> blink in progress is cancelled
+        const val MAX_GAP_MS = 1_000L    // no frame for this long (camera hiccup) -> blink in progress is cancelled
     }
 
     private val lock = Any()
-    private var phase = 0                // 0 = waiting for stable open eyes, 1 = armed (open), 2 = closed, 3 = reopened (confirming)
+    private var phase = 0                // 0 = waiting for stable open eyes, 1 = armed (open), 2 = closed
     private var openRunStart = 0L
     private var closedStart = 0L
-    private var reopenAt = 0L
     private var lastAt = 0L
     private var blinks = 0
     private var faceSeen = false
 
     fun reset() {
         synchronized(lock) {
-            phase = 0; openRunStart = 0L; closedStart = 0L; reopenAt = 0L; lastAt = 0L
+            phase = 0; openRunStart = 0L; closedStart = 0L; lastAt = 0L
             blinks = 0; faceSeen = false
         }
     }
 
-    /** [now] = System.currentTimeMillis(). Called for every analysed frame. */
-    fun update(state: Int, now: Long) {
+    /** [openness] = how open the better eye is (0..1), -1 = not measurable. [now] = System.currentTimeMillis(). */
+    fun update(openness: Float, now: Long) {
         synchronized(lock) {
-            if (state != EyeState.NONE) faceSeen = true
+            if (openness >= 0f) faceSeen = true
             if (lastAt != 0L && now - lastAt > MAX_GAP_MS) { phase = 0; openRunStart = 0L }
             lastAt = now
-            when (state) {
-                EyeState.OPEN -> {
+            when {
+                openness >= OPEN_MIN -> {
                     if (openRunStart == 0L) openRunStart = now
                     when (phase) {
                         0 -> if (now - openRunStart >= ARM_OPEN_MS) phase = 1
-                        2 -> {   // the closure just ended
-                            if (now - closedStart <= MAX_CLOSED_MS) { phase = 3; reopenAt = now }
+                        2 -> {
+                            if (now - closedStart <= MAX_CLOSED_MS) { blinks++; phase = 1 }   // one blink, counted at once
                             else { phase = 0; openRunStart = now }
                         }
-                        3 -> if (now - reopenAt >= REOPEN_CONFIRM_MS) { blinks++; phase = 1 }
                     }
                 }
-                EyeState.CLOSED -> {
+                openness in 0f..CLOSE_MAX -> {
                     openRunStart = 0L
-                    when (phase) {
-                        1 -> { phase = 2; closedStart = now }
-                        3 -> phase = 2                      // flicker: the closure simply goes on
-                    }
+                    if (phase == 1) { phase = 2; closedStart = now }
                     if (phase == 2 && now - closedStart > MAX_CLOSED_MS) phase = 0   // too long: eyes shut, not a blink
                 }
-                EyeState.MAYBE -> { /* half open: a blink may be in progress, change nothing */ }
+                openness >= 0f -> { /* in between: change nothing */ }
                 else -> { phase = 0; openRunStart = 0L }   // no face / eyes not measurable
             }
         }

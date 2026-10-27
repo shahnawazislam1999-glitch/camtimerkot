@@ -12,6 +12,12 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.graphics.BitmapFactory
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CaptureRequest
+import android.util.Range
+import androidx.camera.camera2.interop.Camera2Interop
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -224,7 +230,7 @@ class PresenceService : LifecycleService() {
                 val frameAt = System.currentTimeMillis()
                 Engine.onFrame(r, frameAt)
                 if (Store.settingsFlow.value.eyeClosedDetect) {
-                    eyeTracker.update(r.eye, frameAt)
+                    eyeTracker.update(r.eyeProb, frameAt)
                     if (Engine.humanNow(frameAt)) eyeHumanSeen = true
                 }
                 mainHandler.post { onFrameAnalyzed(); evaluateAlarm() }
@@ -494,6 +500,20 @@ class PresenceService : LifecycleService() {
 
     // ---------- camera ----------
 
+    /**
+     * Highest camera frame-rate range the lens supports that does not exceed [wanted] fps (null = leave the camera alone).
+     * Phones differ: many cannot go above 30 fps, then the best available range is used.
+     */
+    private fun fpsRangeFor(front: Boolean, wanted: Int): Range<Int>? = try {
+        val cm = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        val facing = if (front) CameraCharacteristics.LENS_FACING_FRONT else CameraCharacteristics.LENS_FACING_BACK
+        val id = cm.cameraIdList.firstOrNull { cm.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == facing }
+        val ranges = id?.let { cm.getCameraCharacteristics(it).get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) }
+        ranges?.filter { it.upper <= wanted && it.upper >= 15 }
+            ?.maxWithOrNull(compareBy<Range<Int>>({ it.upper }, { it.lower }))
+    } catch (_: Exception) { null }
+
+    @androidx.annotation.OptIn(ExperimentalCamera2Interop::class)
     private fun bindCamera() {
         val future = ProcessCameraProvider.getInstance(this)
         future.addListener({
@@ -511,10 +531,18 @@ class PresenceService : LifecycleService() {
                 analyzer.mirror = selector == front
 
                 val pv = Preview.Builder().setTargetAspectRatio(AspectRatio.RATIO_4_3).build()
-                val analysis = ImageAnalysis.Builder()
+                val analysisBuilder = ImageAnalysis.Builder()
                     .setTargetAspectRatio(AspectRatio.RATIO_4_3)
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .build()
+                // Eye-closed mode: ask the camera for the chosen frame rate so short blinks are not missed.
+                val st = Store.settingsFlow.value
+                if (st.eyeClosedDetect && !st.aggressiveMode) {
+                    fpsRangeFor(selector == front, st.eyeFps)?.let {
+                        Camera2Interop.Extender(analysisBuilder)
+                            .setCaptureRequestOption(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it)
+                    }
+                }
+                val analysis = analysisBuilder.build()
                 analysis.setAnalyzer(analysisExecutor, analyzer)
 
                 provider.unbindAll()
@@ -877,10 +905,9 @@ class PresenceService : LifecycleService() {
             if (Engine.isPresent()) { finishCheck(true, now); return true }
             return false
         }
-        // A person (face OR only body) is there, but too few blinks for 2 min in a row
-        // (eyes closed, eyes not visible, face hidden, only body detected) -> eyes closed.
-        val seen = eyeHumanSeen || snap.faceSeen
-        if (seen && checkFirstFrame != 0L && now - eyeWatchStart() >= AppSettings.EYE_CLOSED_LIMIT_MS) {
+        // Only the EYES count (no face / body recognition): too few blinks for 2 min = eyes closed,
+        // whether they are shut, not visible, or nobody is there.
+        if (checkFirstFrame != 0L && now - eyeWatchStart() >= AppSettings.EYE_CLOSED_LIMIT_MS) {
             eyeFail(now, snap.blinks, need); return true
         }
         return false
@@ -891,16 +918,12 @@ class PresenceService : LifecycleService() {
         if (eyeEvaluate(now)) return
         val snap = eyeTracker.snapshot()
         val need = Store.settingsFlow.value.eyeBlinksRequired
-        val seen = eyeHumanSeen || snap.faceSeen
         when {
             checkFirstFrame == 0L && now - checkStart >= NO_FRAME_TIMEOUT_MS ->
                 finishCheck(false, now, "⚠️ No camera picture — timer paused, will retry")
-            !seen && checkFirstFrame != 0L && now - checkFirstFrame >= CHECK_WINDOW_MS ->
-                finishCheck(false, now)                         // nobody there: like normal periodic mode
-            seen -> Engine.setStatusText(
-                "👁 Blinks ${snap.blinks} / $need • ${Fmt.time(now - eyeWatchStart())} / ${Fmt.time(AppSettings.EYE_CLOSED_LIMIT_MS)} • countdown keeps running",
-                if (Engine.isPresent()) StatusKind.RUNNING else StatusKind.IDLE)
-            checkFirstFrame != 0L -> Engine.setStatusText("🔍 Looking for a person…",
+            checkFirstFrame != 0L -> Engine.setStatusText(
+                (if (snap.faceSeen) "👁 " else "🔍 Looking for your eyes • ") +
+                    "Blinks ${snap.blinks} / $need • ${Fmt.time(now - eyeWatchStart())} / ${Fmt.time(AppSettings.EYE_CLOSED_LIMIT_MS)} • countdown keeps running",
                 if (Engine.isPresent()) StatusKind.RUNNING else StatusKind.IDLE)
         }
     }
@@ -909,7 +932,7 @@ class PresenceService : LifecycleService() {
     private fun eyeFail(now: Long, blinks: Int, need: Int) {
         val alarmOn = Store.settingsFlow.value.eyeClosedAlarm
         eyeAlarmArmed = alarmOn
-        val why = "😴 Eyes closed — only $blinks of $need blinks in 2 min"
+        val why = "😴 Eyes closed / not visible — only $blinks of $need blinks in 2 min"
         Engine.checkFoundNobody(now, if (alarmOn) "$why • alarm ringing, timer stopped, camera off for good"
                                      else "$why • timer stopped, camera off for good (press Resume)")
         enterSleep(now, 0L)             // camera off (the alarm, if any, keeps ringing while it sleeps)

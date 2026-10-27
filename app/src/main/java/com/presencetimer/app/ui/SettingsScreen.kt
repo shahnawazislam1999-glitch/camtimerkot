@@ -113,13 +113,13 @@ fun SettingsScreen(settings: AppSettings, live: LiveState, onBack: () -> Unit) {
                     "😴 Eye-closed detection",
                     "Every interval (default 5 min) the camera wakes up and watches your eyes for up to 2 minutes. The main countdown " +
                         "keeps running during the check (it never pauses while looking).\n" +
-                        "You must be AWAKE: the camera counts your eye BLINKS (and eye movement). Enough blinks seen -> all fine, " +
+                        "Only your EYES are used: no face or body recognition. The camera looks for your eyes (open / closed) and counts " +
+                        "your BLINKS. Enough blinks seen -> all fine, " +
                         "camera sleeps until the next interval.\n" +
-                        "Too few blinks in 2 minutes (eyes closed, eyes not visible, face hidden, or only your " +
-                        "body / head detected) -> marked as EYES CLOSED: the main countdown STOPS, the alarm rings " +
+                        "Too few blinks in 2 minutes (eyes closed, eyes not visible, face turned away, nobody there) -> marked as EYES CLOSED: the main countdown STOPS, the alarm rings " +
                         "(if the option below is on) and the camera switches OFF FOR GOOD: it does not wake up again by itself. " +
                         "Press Resume to start again.\n" +
-                        "Nobody on camera at all -> timer stops like normal periodic mode. Pause / Resume / Stop silence the alarm.\n" +
+                        "The timer starts when your eyes are seen. Pause / Resume / Stop silence the alarm.\n" +
                         "Uses the interval of Periodic detection; replaces Aggressive mode while ON.",
                     settings.eyeClosedDetect,
                     extra = if (settings.eyeClosedDetect) live.detectionText else null
@@ -136,13 +136,32 @@ fun SettingsScreen(settings: AppSettings, live: LiveState, onBack: () -> Unit) {
                     Text("Blinks needed during the 2 minutes", fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
                         modifier = Modifier.padding(top = 8.dp))
                     Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        listOf(3, 5, 6, 8).forEach { n ->
+                        listOf(1, 2, 3).forEach { n ->
+                            Chip(if (n == 1) "1 blink" else "$n blinks", settings.eyeBlinksRequired == n, Modifier.weight(1f)) {
+                                Store.updateSettings { it.copy(eyeBlinksRequired = n) }
+                            }
+                        }
+                    }
+                    Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(5, 6, 8).forEach { n ->
                             Chip("$n blinks", settings.eyeBlinksRequired == n, Modifier.weight(1f)) {
                                 Store.updateSettings { it.copy(eyeBlinksRequired = n) }
                             }
                         }
                     }
                     Text("Fewer blinks than this in 2 minutes = eyes closed. An awake person blinks about 30 times in 2 minutes.",
+                        color = Muted, fontSize = 11.5.sp, modifier = Modifier.padding(top = 6.dp))
+                    Text("Blink-check frame rate", fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(top = 10.dp))
+                    Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(12, 24, 30, 60).forEach { f ->
+                            Chip("$f fps", settings.eyeFps == f, Modifier.weight(1f)) {
+                                Store.updateSettings { it.copy(eyeFps = f) }
+                            }
+                        }
+                    }
+                    Text("Higher = short blinks are missed less, but uses more battery. The phone camera may not support 60 fps " +
+                        "(then the best it can do is used) and dim light lowers it. Takes effect at the next camera wake-up.",
                         color = Muted, fontSize = 11.5.sp, modifier = Modifier.padding(top = 6.dp))
                     Text("When eyes are marked closed", fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
                         modifier = Modifier.padding(top = 8.dp))

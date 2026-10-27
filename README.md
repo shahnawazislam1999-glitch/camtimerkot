@@ -18,16 +18,21 @@ Detection is fully offline: ML Kit face detection and pose detection (body) ship
 - *Resume when unlocked* (default ON) continues automatically after unlock; otherwise press Resume.
 - A pause you made yourself is never resumed automatically.
 
+## New in 1.9.0 - Pause on screen lock
+- Settings -> **Screen lock** -> *Pause when screen turns off*: power button / lock = camera sleeps + countdown pauses.
+- *Resume when unlocked* (default ON) continues automatically after unlock; otherwise press Resume.
+- A pause you made yourself is never resumed automatically.
+
 ## New in 1.10.0 - Eye-closed detection counts blinks
 - The old "Blink verification" toggle is removed.
 - Settings -> **Eye-closed detection** (toggle). Uses the interval of *Check for a human only every…* (default 5 min).
 - When the interval is due the camera wakes and checks continuously for up to **2 minutes**. The **main countdown keeps running**.
-- The camera counts your **eye blinks**. Enough blinks (3 / **5** / 6 / 8, your choice) -> awake, camera sleeps until the next interval.
+- The camera counts your **eye blinks**. Enough blinks (1 / 2 / 3 / **5** / 6 / 8, your choice) -> awake, camera sleeps until the next interval.
 - Too few blinks in 2 minutes (eyes closed, not visible, only the body / head detected) -> **marked as eyes closed**: countdown stops,
   camera goes off for good (no more automatic checks) and (option) the **alarm rings**. Resume starts again.
 - Nobody on camera at all -> timer stops like normal periodic mode.
-- Blink counting rules (`EyeBlinkCounter`, Detector.kt): eyes open >= 250 ms, closed <= 1 s, open again; flickering of closed eyes cannot fake blinks.
-- Frame rate in this mode is ~12 fps; the body model only runs every 0.8 s to keep it fast.
+- Blink counting (`EyeBlinkCounter`, Detector.kt): very fast blinks count - one frame with the eyes dipping below 50 % between two open frames is a blink (no minimum duration); closures over 1 s are "eyes shut"; flicker of closed eyes cannot fake blinks. A blink shorter than one camera frame can still fall between frames -> use 30 / 60 fps.
+- Blink-check frame rate: 12 / **24** / 30 / 60 fps (setting). The camera is asked for that rate (best supported range is used) and the body model only runs every 0.8 s.
 
 ## New in 1.7.0 - remote pause / start (PC console + SMS)
 - **From the PC console (PC camera mode):** PresenceCam 2.1 shows your main countdown live in big digits and you press

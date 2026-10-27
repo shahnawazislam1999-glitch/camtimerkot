@@ -37,7 +37,8 @@ data class AppSettings(
     val eyeClosedAlarm: Boolean = true,         // eye-closed: true = ring the alarm too, false = only stop the timer
     val pauseOnScreenOff: Boolean = false,      // power button / screen lock -> pause (camera sleeps, countdown pauses)
     val resumeOnUnlock: Boolean = true,         // ...and carry on automatically when the phone is unlocked again
-    val eyeBlinksRequired: Int = 5              // eye mode: blinks that must be seen during the check to count as awake
+    val eyeBlinksRequired: Int = 5,             // eye mode: blinks that must be seen during the check to count as awake
+    val eyeFps: Int = 24                        // eye mode: analysis frame rate (12 / 24 / 30 / 60) so blinks are not missed
 ) {
 
     /** Time between two camera checks in periodic mode. */
@@ -177,6 +178,7 @@ object Store {
                 pauseOnScreenOff = rawSettings.optBoolean("pauseOnScreenOff", false),
                 resumeOnUnlock = rawSettings.optBoolean("resumeOnUnlock", true),
                 eyeBlinksRequired = rawSettings.optInt("eyeBlinksRequired", 5).coerceIn(1, 12),
+                eyeFps = rawSettings.optInt("eyeFps", 24).coerceIn(10, 60),
                 periodicUnit = rawSettings.optInt("periodicUnit", AppSettings.UNIT_MINUTES)
                     .coerceIn(AppSettings.UNIT_SECONDS, AppSettings.UNIT_MINUTES)
             ).let { it.copy(periodicValue = AppSettings.clampValue(rawSettings.optInt("periodicValue", 10), it.periodicUnit)) }
@@ -213,6 +215,7 @@ object Store {
             rawSettings.put("pauseOnScreenOff", s.pauseOnScreenOff)
             rawSettings.put("resumeOnUnlock", s.resumeOnUnlock)
             rawSettings.put("eyeBlinksRequired", s.eyeBlinksRequired)
+            rawSettings.put("eyeFps", s.eyeFps)
             prefs.edit().putString(KEY_SETTINGS, rawSettings.toString()).apply()
             settingsFlow.update { s }
         }

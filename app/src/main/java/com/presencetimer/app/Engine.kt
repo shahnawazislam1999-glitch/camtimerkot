@@ -23,6 +23,13 @@ object EyeState {
     private const val OPEN_MIN = 0.60f     // at least one eye clearly open
     private const val MAX_YAW = 40f        // beyond this the eye probabilities are not reliable
 
+    /** How open the better eye is (0..1), or -1 when the eyes cannot be measured (blink counting uses this). */
+    fun openness(left: Float?, right: Float?, yaw: Float): Float {
+        if (left == null || right == null) return -1f
+        if (kotlin.math.abs(yaw) > MAX_YAW) return -1f
+        return maxOf(left, right)
+    }
+
     fun classify(left: Float?, right: Float?, yaw: Float): Int {
         if (left == null || right == null) return UNKNOWN
         if (kotlin.math.abs(yaw) > MAX_YAW) return UNKNOWN
@@ -41,7 +48,8 @@ data class FrameResult(
     val bodyConfidence: Float,
     val bodyBox: NBox?,
     val verdict: VerifyVerdict? = null,  // aggressive mode: result of the multi-signal human check
-    val eye: Int = EyeState.NONE         // eye-closed mode: state of the eyes of the main face
+    val eye: Int = EyeState.NONE,        // eye-closed mode: state of the eyes of the main face
+    val eyeProb: Float = -1f             // eye-closed mode: how open the better eye is (0..1), -1 = not measurable
 )
 
 data class LiveState(
@@ -292,6 +300,7 @@ object Engine {
         synchronized(lock) {
             if (!detecting) return false
 
+            val eyeMode = Store.settingsFlow.value.let { it.eyeClosedDetect && !it.aggressiveMode }
             val strongFace = r.faces.any { it.strong }
             val hasFace = r.faces.isNotEmpty()
             val corroborated = hasFace && r.bodyDetected
@@ -307,6 +316,10 @@ object Engine {
                 // Aggressive mode: ONLY the multi-signal verifier decides (a chair never passes it).
                 faceDetected = r.verdict.confirmed
                 human = faceDetected
+            } else if (eyeMode) {
+                // Eye-closed mode: ONLY the eyes count. A face or body without visible eyes is not a "human" here.
+                faceDetected = r.eye == EyeState.OPEN || r.eye == EyeState.CLOSED || r.eye == EyeState.MAYBE
+                human = faceDetected
             } else {
                 faceDetected = strongFace || corroborated || weakConfirmed
                 human = faceDetected || r.bodyDetected
@@ -320,7 +333,7 @@ object Engine {
 
             if (human) {
                 val types = listOfNotNull(
-                    if (faceDetected) "Face" else null,
+                    if (faceDetected) (if (eyeMode) "Eyes" else "Face") else null,
                     if (r.bodyDetected) "Body" else null
                 ).joinToString(" + ")
                 text = "Detected: $types" +
