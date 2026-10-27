@@ -31,17 +31,14 @@ data class AppSettings(
     val delayedAlarmEnabled: Boolean = false,   // global: alarm only after DELAYED_ALARM_MS of no human / no PC link
     val idleSleepEnabled: Boolean = true,       // camera sleeps after NO_HUMAN_SLEEP_MS without a human, wakes every interval
     val aggressiveMode: Boolean = false,        // multi-signal human verification (head/eyes/nose/movement), chair-proof
-    val blinkOnly: Boolean = false,             // a person only counts after an eye blink was seen
     val autoReset24h: Boolean = false,          // main countdown goes back to 0 every 24 hours
     val autoResetAnchorMs: Long = 0L,           // when the current 24 h cycle started
     val eyeClosedDetect: Boolean = false,       // eyes closed for 5 min in a row at a check -> timer stops (+ alarm)
     val eyeClosedAlarm: Boolean = true,         // eye-closed: true = ring the alarm too, false = only stop the timer
     val pauseOnScreenOff: Boolean = false,      // power button / screen lock -> pause (camera sleeps, countdown pauses)
-    val resumeOnUnlock: Boolean = true          // ...and carry on automatically when the phone is unlocked again
+    val resumeOnUnlock: Boolean = true,         // ...and carry on automatically when the phone is unlocked again
+    val eyeBlinksRequired: Int = 5              // eye mode: blinks that must be seen during the check to count as awake
 ) {
-    /** Blink verification only applies while neither aggressive nor eye-closed mode is on. */
-    val blinkActive: Boolean
-        get() = blinkOnly && !aggressiveMode && !eyeClosedDetect
 
     /** Time between two camera checks in periodic mode. */
     val periodicIntervalMs: Long
@@ -54,7 +51,7 @@ data class AppSettings(
         /** Aggressive mode: after the camera wakes it keeps checking for a human this long; no human -> alarm + sleep + timer stops. */
         const val AGG_CHECK_WINDOW_MS = 5 * 60 * 1000L
         const val NO_HUMAN_SLEEP_MS = 5 * 60 * 1000L
-        /** Eye-closed mode: the camera checks continuously this long; no open eyes seen in that time -> stop. */
+        /** Eye-closed mode: the camera checks continuously this long; too few blinks in that time -> eyes closed -> stop. */
         const val EYE_CLOSED_LIMIT_MS = 2 * 60 * 1000L
         /** Eye-closed mode: longest a single check may last when no closed-eye streak is running. */
         const val EYE_CHECK_WINDOW_MS = EYE_CLOSED_LIMIT_MS + 30_000L
@@ -173,13 +170,13 @@ object Store {
                 delayedAlarmEnabled = rawSettings.optBoolean("delayedAlarmEnabled", false),
                 idleSleepEnabled = rawSettings.optBoolean("idleSleepEnabled", true),
                 aggressiveMode = rawSettings.optBoolean("aggressiveMode", false),
-                blinkOnly = rawSettings.optBoolean("blinkOnly", false),
                 autoReset24h = rawSettings.optBoolean("autoReset24h", false),
                 autoResetAnchorMs = rawSettings.optLong("autoResetAnchorMs", 0L),
                 eyeClosedDetect = rawSettings.optBoolean("eyeClosedDetect", false),
                 eyeClosedAlarm = rawSettings.optBoolean("eyeClosedAlarm", true),
                 pauseOnScreenOff = rawSettings.optBoolean("pauseOnScreenOff", false),
                 resumeOnUnlock = rawSettings.optBoolean("resumeOnUnlock", true),
+                eyeBlinksRequired = rawSettings.optInt("eyeBlinksRequired", 5).coerceIn(1, 12),
                 periodicUnit = rawSettings.optInt("periodicUnit", AppSettings.UNIT_MINUTES)
                     .coerceIn(AppSettings.UNIT_SECONDS, AppSettings.UNIT_MINUTES)
             ).let { it.copy(periodicValue = AppSettings.clampValue(rawSettings.optInt("periodicValue", 10), it.periodicUnit)) }
@@ -209,13 +206,13 @@ object Store {
             rawSettings.put("delayedAlarmEnabled", s.delayedAlarmEnabled)
             rawSettings.put("idleSleepEnabled", s.idleSleepEnabled)
             rawSettings.put("aggressiveMode", s.aggressiveMode)
-            rawSettings.put("blinkOnly", s.blinkOnly)
             rawSettings.put("autoReset24h", s.autoReset24h)
             rawSettings.put("autoResetAnchorMs", s.autoResetAnchorMs)
             rawSettings.put("eyeClosedDetect", s.eyeClosedDetect)
             rawSettings.put("eyeClosedAlarm", s.eyeClosedAlarm)
             rawSettings.put("pauseOnScreenOff", s.pauseOnScreenOff)
             rawSettings.put("resumeOnUnlock", s.resumeOnUnlock)
+            rawSettings.put("eyeBlinksRequired", s.eyeBlinksRequired)
             prefs.edit().putString(KEY_SETTINGS, rawSettings.toString()).apply()
             settingsFlow.update { s }
         }

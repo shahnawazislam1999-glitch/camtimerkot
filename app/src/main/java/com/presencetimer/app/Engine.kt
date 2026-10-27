@@ -19,8 +19,8 @@ object EyeState {
     const val UNKNOWN = 3    // face seen but the eyes cannot be measured (head turned far, no probabilities)
     const val MAYBE = 4      // in between (squint, half-closed, blink in progress)
 
-    private const val CLOSED_MAX = 0.30f   // the BETTER eye is still below this -> both eyes are closed
-    private const val OPEN_MIN = 0.55f     // at least one eye clearly open
+    private const val CLOSED_MAX = 0.40f   // the BETTER eye is still below this -> both eyes are closed
+    private const val OPEN_MIN = 0.60f     // at least one eye clearly open
     private const val MAX_YAW = 40f        // beyond this the eye probabilities are not reliable
 
     fun classify(left: Float?, right: Float?, yaw: Float): Int {
@@ -40,7 +40,6 @@ data class FrameResult(
     val bodyDetected: Boolean,
     val bodyConfidence: Float,
     val bodyBox: NBox?,
-    val blinked: Boolean = false,    // an eye blink was completed in this frame
     val verdict: VerifyVerdict? = null,  // aggressive mode: result of the multi-signal human check
     val eye: Int = EyeState.NONE         // eye-closed mode: state of the eyes of the main face
 )
@@ -79,10 +78,6 @@ object Engine {
     const val STOP_DEBOUNCE_MS = 1500L
     private const val RECENT_WINDOW = 5
     private const val RECENT_REQUIRED = 2
-    /** Blink mode: a blink keeps the person "confirmed" for this long (people blink every few seconds). */
-    const val BLINK_VALID_MS = 30_000L
-    /** Blink mode: face gone this long -> the next blink has to be seen again. */
-    private const val BLINK_FACE_LOST_MS = 2_000L
 
     private val lock = Any()
     private val _live = MutableStateFlow(LiveState())
@@ -104,8 +99,6 @@ object Engine {
     private var lastNotifyAt = 0L
     private var periodic = false
     private var manualPaused = false
-    private var lastBlinkAt = 0L
-    private var lastFaceAt = 0L
     private val recentWeak = ArrayDeque<Int>()
 
     fun init() {
@@ -142,7 +135,6 @@ object Engine {
             detecting = true; present = false
             firstSeen = 0; lastSeen = 0; sessionStart = 0; dailyCursor = 0
             recentWeak.clear(); personWasSeen = false
-            lastBlinkAt = 0; lastFaceAt = 0
             lastFrameAt = 0; lastFrameHuman = false
             publish { it.copy(status = "🟡 Looking for face or body...", statusKind = StatusKind.IDLE,
                 detectionText = "Camera active", error = null, faces = emptyList(), body = null,
@@ -300,7 +292,6 @@ object Engine {
         synchronized(lock) {
             if (!detecting) return false
 
-            val blinkMode = Store.settingsFlow.value.blinkActive
             val strongFace = r.faces.any { it.strong }
             val hasFace = r.faces.isNotEmpty()
             val corroborated = hasFace && r.bodyDetected
@@ -310,22 +301,12 @@ object Engine {
             while (recentWeak.size > RECENT_WINDOW) recentWeak.removeFirst()
             val weakConfirmed = weak && recentWeak.sum() >= RECENT_REQUIRED
 
-            // Blink verification: only a real face that blinked in the last BLINK_VALID_MS counts.
-            var blinkWaiting = false
             val faceDetected: Boolean
             val human: Boolean
             if (r.verdict != null) {
                 // Aggressive mode: ONLY the multi-signal verifier decides (a chair never passes it).
                 faceDetected = r.verdict.confirmed
                 human = faceDetected
-            } else if (blinkMode) {
-                if (strongFace) lastFaceAt = now
-                else if (now - lastFaceAt > BLINK_FACE_LOST_MS) lastBlinkAt = 0
-                if (r.blinked && strongFace) lastBlinkAt = now
-                val blinkValid = lastBlinkAt != 0L && now - lastBlinkAt <= BLINK_VALID_MS
-                faceDetected = strongFace && blinkValid
-                human = faceDetected
-                blinkWaiting = strongFace && !blinkValid
             } else {
                 faceDetected = strongFace || corroborated || weakConfirmed
                 human = faceDetected || r.bodyDetected
@@ -343,7 +324,6 @@ object Engine {
                     if (r.bodyDetected) "Body" else null
                 ).joinToString(" + ")
                 text = "Detected: $types" +
-                    (if (blinkMode) " • Blink OK" else "") +
                     if (r.bodyDetected) " • Body ${(r.bodyConfidence * 100).toInt()}%" else ""
                 personWasSeen = true
                 if (firstSeen == 0L) firstSeen = now
@@ -353,7 +333,7 @@ object Engine {
                     status = "🟢 Human detected — Timer running"; kind = StatusKind.RUNNING
                 }
             } else {
-                text = if (blinkWaiting) "Face seen — blink to confirm" else "Detected: None"
+                text = "Detected: None"
                 if (!present && firstSeen != 0L && now - lastSeen >= STOP_DEBOUNCE_MS) firstSeen = 0
                 // Periodic mode: the service decides at the end of the check window instead.
                 if (!periodic && present && now - lastSeen >= STOP_DEBOUNCE_MS) {

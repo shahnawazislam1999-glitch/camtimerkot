@@ -18,14 +18,16 @@ Detection is fully offline: ML Kit face detection and pose detection (body) ship
 - *Resume when unlocked* (default ON) continues automatically after unlock; otherwise press Resume.
 - A pause you made yourself is never resumed automatically.
 
-## New in 1.8.0 - Eye-closed detection
+## New in 1.10.0 - Eye-closed detection counts blinks
+- The old "Blink verification" toggle is removed.
 - Settings -> **Eye-closed detection** (toggle). Uses the interval of *Check for a human only every…* (default 5 min).
-- When the interval is due the camera **wakes** and checks continuously. The **main countdown keeps running** during the check.
-- Eyes seen **open** (~1.2 s) -> awake, check passed, camera sleeps until the next interval.
-- **No open eyes for 2 minutes in a row** (eyes closed, eyes not visible, face hidden, or only the body / head detected) -> **countdown stops, camera goes off for good** (no more automatic checks) and (option) the **alarm rings**.
-- Nobody on camera at all -> timer stops like normal periodic mode; the camera keeps looking.
-- Option **Ring alarm + stop timer** / **Only stop timer** (no sound). The alarm stops with Pause / Resume / Stop; Resume also starts a new check.
-- Replaces Aggressive mode and Blink verification while ON. Limit: `AppSettings.EYE_CLOSED_LIMIT_MS`, thresholds in `EyeState` (Engine.kt), open-eye logic in `EyeClosedTracker` (Detector.kt).
+- When the interval is due the camera wakes and checks continuously for up to **2 minutes**. The **main countdown keeps running**.
+- The camera counts your **eye blinks**. Enough blinks (3 / **5** / 6 / 8, your choice) -> awake, camera sleeps until the next interval.
+- Too few blinks in 2 minutes (eyes closed, not visible, only the body / head detected) -> **marked as eyes closed**: countdown stops,
+  camera goes off for good (no more automatic checks) and (option) the **alarm rings**. Resume starts again.
+- Nobody on camera at all -> timer stops like normal periodic mode.
+- Blink counting rules (`EyeBlinkCounter`, Detector.kt): eyes open >= 250 ms, closed <= 1 s, open again; flickering of closed eyes cannot fake blinks.
+- Frame rate in this mode is ~12 fps; the body model only runs every 0.8 s to keep it fast.
 
 ## New in 1.7.0 - remote pause / start (PC console + SMS)
 - **From the PC console (PC camera mode):** PresenceCam 2.1 shows your main countdown live in big digits and you press

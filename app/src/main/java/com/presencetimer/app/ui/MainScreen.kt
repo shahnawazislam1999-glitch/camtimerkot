@@ -772,7 +772,6 @@ private fun CameraSettingsSummary(settings: AppSettings, onOpen: () -> Unit) {
         if (settings.idleSleepEnabled) add("sleeps after 5 min idle (wakes every ${settings.periodicValue}$unit)")
         if (settings.aggressiveMode) add("aggressive human check")
         if (settings.eyeClosedDetect) add(if (settings.eyeClosedAlarm) "eyes-closed alarm" else "eyes-closed stop")
-        if (settings.blinkOnly) add("blink check on")
         if (settings.autoReset24h) add("daily 12 AM reset")
         if (settings.hideCamera) add("preview hidden")
         if (settings.delayedAlarmEnabled) add("2 min alarm on")

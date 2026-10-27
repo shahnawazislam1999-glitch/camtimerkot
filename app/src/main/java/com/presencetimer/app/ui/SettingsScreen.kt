@@ -92,12 +92,12 @@ fun SettingsScreen(settings: AppSettings, live: LiveState, onBack: () -> Unit) {
                         "(Pause / Resume / Stop silence the alarm).\n" +
                         "A few small temporary photos are kept in the app's private cache, analysed on the phone " +
                         "(nothing is uploaded) and deleted when the check ends.\n" +
-                        "Uses the interval of Periodic detection; replaces Blink verification and the 2-minute alarm while ON.",
+                        "Uses the interval of Periodic detection; replaces the 2-minute alarm while ON.",
                     settings.aggressiveMode,
                     extra = if (settings.aggressiveMode) live.detectionText else null
                 ) { v ->
                     Store.updateSettings {
-                        if (v) it.copy(aggressiveMode = true, eyeClosedDetect = false, blinkOnly = false, idleSleepEnabled = false,
+                        if (v) it.copy(aggressiveMode = true, eyeClosedDetect = false, idleSleepEnabled = false,
                             periodicEnabled = true,
                             periodicValue = if (it.periodicEnabled) it.periodicValue else 5,
                             periodicUnit = if (it.periodicEnabled) it.periodicUnit else AppSettings.UNIT_MINUTES)
@@ -113,17 +113,19 @@ fun SettingsScreen(settings: AppSettings, live: LiveState, onBack: () -> Unit) {
                     "😴 Eye-closed detection",
                     "Every interval (default 5 min) the camera wakes up and watches your eyes for up to 2 minutes. The main countdown " +
                         "keeps running during the check (it never pauses while looking).\n" +
-                        "You must be AWAKE: the camera has to see your eyes OPEN. Seen open -> all fine, camera sleeps until the next interval.\n" +
-                        "No open eyes for 2 minutes in a row (eyes closed, eyes not visible, face hidden, or only your " +
-                        "body / head detected) -> the main countdown STOPS, the alarm rings (if the option below is on) " +
-                        "and the camera switches OFF FOR GOOD: it does not wake up again by itself. Press Resume to start again.\n" +
+                        "You must be AWAKE: the camera counts your eye BLINKS (and eye movement). Enough blinks seen -> all fine, " +
+                        "camera sleeps until the next interval.\n" +
+                        "Too few blinks in 2 minutes (eyes closed, eyes not visible, face hidden, or only your " +
+                        "body / head detected) -> marked as EYES CLOSED: the main countdown STOPS, the alarm rings " +
+                        "(if the option below is on) and the camera switches OFF FOR GOOD: it does not wake up again by itself. " +
+                        "Press Resume to start again.\n" +
                         "Nobody on camera at all -> timer stops like normal periodic mode. Pause / Resume / Stop silence the alarm.\n" +
-                        "Uses the interval of Periodic detection; replaces Aggressive mode and Blink verification while ON.",
+                        "Uses the interval of Periodic detection; replaces Aggressive mode while ON.",
                     settings.eyeClosedDetect,
                     extra = if (settings.eyeClosedDetect) live.detectionText else null
                 ) { v ->
                     Store.updateSettings {
-                        if (v) it.copy(eyeClosedDetect = true, aggressiveMode = false, blinkOnly = false,
+                        if (v) it.copy(eyeClosedDetect = true, aggressiveMode = false,
                             periodicEnabled = true,
                             periodicValue = if (it.periodicEnabled) it.periodicValue else 5,
                             periodicUnit = if (it.periodicEnabled) it.periodicUnit else AppSettings.UNIT_MINUTES)
@@ -131,7 +133,18 @@ fun SettingsScreen(settings: AppSettings, live: LiveState, onBack: () -> Unit) {
                     }
                 }
                 if (settings.eyeClosedDetect) {
-                    Text("When no open eyes are seen for 2 minutes", fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                    Text("Blinks needed during the 2 minutes", fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(top = 8.dp))
+                    Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(3, 5, 6, 8).forEach { n ->
+                            Chip("$n blinks", settings.eyeBlinksRequired == n, Modifier.weight(1f)) {
+                                Store.updateSettings { it.copy(eyeBlinksRequired = n) }
+                            }
+                        }
+                    }
+                    Text("Fewer blinks than this in 2 minutes = eyes closed. An awake person blinks about 30 times in 2 minutes.",
+                        color = Muted, fontSize = 11.5.sp, modifier = Modifier.padding(top = 6.dp))
+                    Text("When eyes are marked closed", fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
                         modifier = Modifier.padding(top = 8.dp))
                     Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Chip("🔔 Ring alarm + stop timer", settings.eyeClosedAlarm, Modifier.weight(1f)) {
@@ -146,20 +159,6 @@ fun SettingsScreen(settings: AppSettings, live: LiveState, onBack: () -> Unit) {
                     else "No sound: the countdown just stops and the camera stays off until you press Resume.",
                         color = Muted, fontSize = 11.5.sp, modifier = Modifier.padding(top = 6.dp))
                 }
-            }
-
-            // Blink verification
-            Card {
-                SectionTitle("Detection mode")
-                ToggleRow(
-                    "👁 Blink verification",
-                    "When ON, a person only counts after the camera sees them BLINK (both eyes close and open). " +
-                        "A face that never blinks (photo, screen, poster) is ignored, and the person is " +
-                        "confirmed for 30 seconds after each blink. Body detection is not used in this mode. " +
-                        "When OFF, normal face + body detection is used.",
-                    settings.blinkOnly,
-                    extra = if (settings.blinkOnly) "Look at the camera and blink once to start the timer" else null
-                ) { v -> Store.updateSettings { it.copy(blinkOnly = v) } }
             }
 
             // Daily 12 AM auto reset
